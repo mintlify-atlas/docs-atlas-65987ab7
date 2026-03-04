@@ -1,0 +1,102 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "Coraza Proxy",
+  "projectDescription": "A high-performance WAF reverse proxy built with Coraza and OWASP Core Rule Set for protecting web applications and APIs",
+  "theme": "aspen",
+  "primaryColor": "#4595db",
+  "lightColor": "#5ebf9e",
+  "darkColor": "#0494dc",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker",
+              "deployment/docker-compose",
+              "deployment/configuration"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/backends",
+              "configuration/waf-rules",
+              "configuration/rate-limiting",
+              "configuration/geoip-blocking",
+              "configuration/bot-detection"
+            ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "security/protection-levels",
+              "security/attack-detection",
+              "security/testing"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/monitoring",
+              "operations/logging",
+              "operations/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Functions",
+            "pages": [
+              "api/rate-limiter",
+              "api/backend-routing",
+              "api/waf-integration",
+              "api/geoip-filter"
+            ]
+          },
+          {
+            "group": "Environment Variables",
+            "pages": [
+              "api/environment-variables"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "WAF protection with Coraza and OWASP Core Rule Set",
+    "Reverse proxy with multi-backend routing and load balancing",
+    "Per-IP rate limiting with automatic cleanup",
+    "GeoIP-based access control (allow/block countries)",
+    "Bot detection and blocking",
+    "Separate protection profiles for APIs (PL2) and websites (PL1)",
+    "Docker and Docker Compose deployment",
+    "Comprehensive request/response inspection",
+    "Audit logging for security events"
+  ],
+  "publicApiSurface": [
+    "IPRateLimiter.NewIPRateLimiter(r, b)",
+    "IPRateLimiter.GetLimiter(ip)",
+    "loadBackendsFromEnv()",
+    "loadWAF(paths)",
+    "realClientIP(r)",
+    "geoFilter(r, allow, block)",
+    "pickBackendForRequest(hostCfg, path)",
+    "shouldBlock(it)",
+    "getCountryCode(ipStr)"
+  ]
+}
