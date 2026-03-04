@@ -1,0 +1,268 @@
+---
+title: 'Backend Routing'
+description: 'Multi-backend routing with host-based and path-based selection'
+---
+
+## Overview
+
+The backend routing system supports flexible request routing based on hostnames and URL paths. It provides both legacy and new configuration formats with round-robin load balancing.
+
+## Types
+
+### Backend
+
+Represents a backend server pool with load balancing.
+
+```go main.go:24-27
+type Backend struct {
+    Addrs   []string
+    Counter uint64
+}
+```
+
+<ResponseField name="Addrs" type="[]string">
+  List of backend addresses (e.g., `["web:80", "web2:80"]`)
+</ResponseField>
+
+<ResponseField name="Counter" type="uint64">
+  Atomic counter for round-robin load balancing
+</ResponseField>
+
+### HostBackend
+
+Defines routing configuration for a specific host.
+
+```go main.go:42-45
+type HostBackend struct {
+    Default *Backend
+    Paths   map[string]*Backend // key = prefix, e.g. "/static"
+}
+```
+
+<ResponseField name="Default" type="*Backend">
+  Default backend for requests that don't match any path prefix
+</ResponseField>
+
+<ResponseField name="Paths" type="map[string]*Backend">
+  Map of URL path prefixes to specific backends. Longest prefix wins.
+</ResponseField>
+
+## Functions
+
+### loadBackendsFromEnv()
+
+Loads backend configurations from the `BACKENDS` environment variable or assigns a default backend.
+
+```go main.go:98-161
+func loadBackendsFromEnv() (map[string]*HostBackend, error)
+```
+
+<ResponseField name="return" type="map[string]*HostBackend">
+  Map of hostnames to their backend configurations
+</ResponseField>
+
+<ResponseField name="error" type="error">
+  Error if JSON parsing fails
+</ResponseField>
+
+#### Supported Formats
+
+**New Format (Recommended)** - Supports path-based routing:
+
+```json
+{
+  "example.com": {
+    "default": ["web:80", "web2:80"],
+    "paths": {
+      "/static": ["static:80"],
+      "/api": ["api:8080"]
+    }
+  }
+}
+```
+
+**Legacy Format** - Host-only routing:
+
+```json
+{
+  "example.com": ["web:80"],
+  "api.example.com": ["api:8080"],
+  "default": ["localhost:5000"]
+}
+```
+
+#### Default Behavior
+
+If `BACKENDS` is empty or not set:
+
+```go main.go:100-106
+if strings.TrimSpace(raw) == "" {
+    return map[string]*HostBackend{
+        "default": {
+            Default: &Backend{Addrs: []string{"localhost:5000"}},
+            Paths:   map[string]*Backend{},
+        },
+    }, nil
+}
+```
+
+<Note>
+  The loader automatically falls back to using the first path backend if no default is specified in the new format (lines 133-140).
+</Note>
+
+### pickBackendForRequest()
+
+Selects the appropriate backend for a request based on path prefix matching.
+
+```go main.go:317-341
+func pickBackendForRequest(hostCfg *HostBackend, path string) *Backend {
+    if hostCfg == nil {
+        return nil
+    }
+
+    // Match longest prefix (important if you have /static and /static/img)
+    var (
+        bestLen int
+        best    *Backend
+    )
+    for pfx, be := range hostCfg.Paths {
+        if strings.HasPrefix(path, pfx) && len(pfx) > bestLen {
+            bestLen = len(pfx)
+            best = be
+        }
+    }
+    if best != nil && len(best.Addrs) > 0 {
+        return best
+    }
+
+    if hostCfg.Default != nil && len(hostCfg.Default.Addrs) > 0 {
+        return hostCfg.Default
+    }
+    return nil
+}
+```
+
+<ParamField path="hostCfg" type="*HostBackend" required>
+  Host-specific backend configuration
+</ParamField>
+
+<ParamField path="path" type="string" required>
+  URL path from the request (e.g., `/static/image.png`)
+</ParamField>
+
+<ResponseField name="return" type="*Backend">
+  Selected backend or nil if none found
+</ResponseField>
+
+#### Matching Logic
+
+1. **Longest Prefix Match**: Finds the longest matching path prefix from `Paths` map
+2. **Default Fallback**: Uses `Default` backend if no path matches
+3. **Nil Return**: Returns nil if no valid backend is configured
+
+#### Usage Example
+
+From main.go:541-553:
+
+```go
+// Get host configuration
+hostCfg, ok := backends[hostOnly]
+if !ok {
+    hostCfg = backends["default"]
+}
+
+// Pick backend based on path
+be := pickBackendForRequest(hostCfg, r.URL.Path)
+if be == nil || len(be.Addrs) == 0 {
+    http.Error(w, "Bad Gateway: backend not configured", http.StatusBadGateway)
+    return
+}
+
+// Round-robin selection
+idx := int((atomic.AddUint64(&be.Counter, 1) - 1) % uint64(len(be.Addrs)))
+target := be.Addrs[idx]
+```
+
+### splitHostPort()
+
+Extracts the host and port from a network address string. Defaults to port 80 if not specified.
+
+```go main.go:190-199
+func splitHostPort(addr string) (string, int) {
+    host, portStr, err := net.SplitHostPort(addr)
+    if err == nil {
+        port, _ := strconv.Atoi(portStr)
+        return host, port
+    }
+
+    // No port → use default
+    return addr, 80
+}
+```
+
+<ParamField path="addr" type="string" required>
+  Network address (e.g., `"192.168.1.1:8080"` or `"example.com"`)
+</ParamField>
+
+<ResponseField name="host" type="string">
+  Hostname or IP address
+</ResponseField>
+
+<ResponseField name="port" type="int">
+  Port number (defaults to 80 if not specified)
+</ResponseField>
+
+#### Usage Example
+
+```go
+// From main.go:488-490
+clientIP, clientPort := splitHostPort(r.RemoteAddr)
+serverIP, serverPort := splitHostPort(r.Host)
+tx.ProcessConnection(clientIP, clientPort, serverIP, serverPort)
+```
+
+## Load Balancing
+
+### Round-Robin Algorithm
+
+Backends with multiple addresses use atomic counter-based round-robin:
+
+```go main.go:552-553
+idx := int((atomic.AddUint64(&be.Counter, 1) - 1) % uint64(len(be.Addrs)))
+target := be.Addrs[idx]
+```
+
+This ensures thread-safe distribution across backend servers.
+
+## Environment Variables
+
+See [Environment Variables](/api/environment-variables) for configuration:
+
+- `BACKENDS` - JSON configuration for backend routing
+
+## Complete Example
+
+```bash
+export BACKENDS='{
+  "example.com": {
+    "default": ["web1:80", "web2:80"],
+    "paths": {
+      "/static": ["cdn:80"],
+      "/api/v1": ["api1:8080", "api2:8080"]
+    }
+  },
+  "admin.example.com": {
+    "default": ["admin:3000"]
+  },
+  "default": {
+    "default": ["localhost:5000"]
+  }
+}'
+```
+
+**Routing behavior:**
+- `example.com/static/logo.png` → `cdn:80`
+- `example.com/api/v1/users` → `api1:8080` or `api2:8080` (round-robin)
+- `example.com/about` → `web1:80` or `web2:80` (round-robin)
+- `admin.example.com/dashboard` → `admin:3000`
+- `unknown.com/page` → `localhost:5000` (default)

@@ -1,0 +1,288 @@
+---
+title: 'GeoIP Filtering'
+description: 'Geographic IP filtering with allowlist and blocklist support'
+---
+
+## Overview
+
+The GeoIP filtering system blocks or allows requests based on the geographic location of the client IP address using MaxMind GeoLite2 database.
+
+## Functions
+
+### loadGeoIP()
+
+Loads the MaxMind GeoIP2 database from the specified file path.
+
+```go main.go:264-271
+func loadGeoIP(path string) {
+    var err error
+    geoDB, err = geoip2.Open(path)
+    if err != nil {
+        log.Fatalf("GeoIP DB error: %v", err)
+    }
+    log.Println("GeoIP database loaded")
+}
+```
+
+<ParamField path="path" type="string" required>
+  File path to GeoLite2-Country.mmdb database
+</ParamField>
+
+<Warning>
+  Fatal error if database file cannot be loaded. Ensure the database file exists at the specified path.
+</Warning>
+
+#### Usage Example
+
+From main.go:370-373:
+
+```go
+geoBlockEnabled = getEnvBool("GEO_BLOCK_ENABLED", false)
+if geoBlockEnabled {
+    loadGeoIP("/app/GeoLite2-Country.mmdb")
+}
+```
+
+### getCountryCode()
+
+Returns the ISO country code for a given IP address.
+
+```go main.go:273-283
+func getCountryCode(ipStr string) (string, error) {
+    ip := net.ParseIP(ipStr)
+    if ip == nil {
+        return "", fmt.Errorf("invalid IP")
+    }
+    record, err := geoDB.Country(ip)
+    if err != nil {
+        return "", err
+    }
+    return record.Country.IsoCode, nil
+}
+```
+
+<ParamField path="ipStr" type="string" required>
+  IP address as string (e.g., `"192.168.1.100"` or `"2001:db8::1"`)
+</ParamField>
+
+<ResponseField name="countryCode" type="string">
+  Two-letter ISO country code (e.g., `"US"`, `"CN"`, `"DE"`)
+</ResponseField>
+
+<ResponseField name="error" type="error">
+  Error if IP is invalid or lookup fails
+</ResponseField>
+
+#### Example
+
+```go
+code, err := getCountryCode("8.8.8.8")
+if err != nil {
+    log.Printf("Lookup failed: %v", err)
+} else {
+    fmt.Printf("Country: %s\n", code) // Output: Country: US
+}
+```
+
+### geoFilter()
+
+Filters requests based on geographic allow/block lists.
+
+```go main.go:296-315
+func geoFilter(r *http.Request, allow, block map[string]struct{}) (bool, string) {
+    ip, _ := splitHostPort(r.RemoteAddr)
+
+    country, err := getCountryCode(ip)
+    if err != nil {
+        return false, "geo lookup failed"
+    }
+
+    if _, blocked := block[country]; blocked {
+        return false, "geo blocked"
+    }
+
+    if len(allow) > 0 {
+        if _, ok := allow[country]; !ok {
+            return false, "geo not allowed"
+        }
+    }
+
+    return true, country
+}
+```
+
+<ParamField path="r" type="*http.Request" required>
+  HTTP request containing RemoteAddr
+</ParamField>
+
+<ParamField path="allow" type="map[string]struct{}" required>
+  Set of allowed country codes (empty map = allow all)
+</ParamField>
+
+<ParamField path="block" type="map[string]struct{}" required>
+  Set of blocked country codes
+</ParamField>
+
+<ResponseField name="allowed" type="bool">
+  true if request should be allowed, false if blocked
+</ResponseField>
+
+<ResponseField name="reason" type="string">
+  Country code if allowed, or reason string if blocked
+</ResponseField>
+
+#### Filtering Logic
+
+1. **Lookup fails**: Return `false, "geo lookup failed"`
+2. **Country in blocklist**: Return `false, "geo blocked"`
+3. **Allowlist non-empty AND country not in allowlist**: Return `false, "geo not allowed"`
+4. **Otherwise**: Return `true, countryCode`
+
+<Note>
+  Blocklist takes precedence over allowlist. If both are specified, blocked countries are rejected even if in the allowlist.
+</Note>
+
+#### Usage Example
+
+From main.go:432-439:
+
+```go
+if geoBlockEnabled {
+    allowed, country := geoFilter(r, geoAllow, geoBlock)
+    if !allowed {
+        log.Printf("[GEO] blocked %s from %s", r.RemoteAddr, country)
+        http.Error(w, "Access denied by GeoIP policy", http.StatusForbidden)
+        return
+    }
+}
+```
+
+### parseCSVSet()
+
+Parses a comma-separated string of country codes into a set.
+
+```go main.go:285-294
+func parseCSVSet(env string) map[string]struct{} {
+    out := map[string]struct{}{}
+    for _, c := range strings.Split(env, ",") {
+        c = strings.TrimSpace(strings.ToUpper(c))
+        if c != "" {
+            out[c] = struct{}{}
+        }
+    }
+    return out
+}
+```
+
+<ParamField path="env" type="string" required>
+  Comma-separated country codes (e.g., `"US,GB,DE"`)
+</ParamField>
+
+<ResponseField name="return" type="map[string]struct{}">
+  Set of uppercase country codes
+</ResponseField>
+
+#### Features
+
+- Automatically converts to uppercase
+- Trims whitespace
+- Skips empty values
+- Returns empty map for empty input
+
+#### Usage Example
+
+From main.go:417-420:
+
+```go
+if geoBlockEnabled {
+    geoAllow = parseCSVSet(os.Getenv("GEO_ALLOW_COUNTRIES"))
+    geoBlock = parseCSVSet(os.Getenv("GEO_BLOCK_COUNTRIES"))
+}
+```
+
+## Global Variables
+
+```go main.go:47-53
+var geoDB *geoip2.Reader
+
+var geoBlockEnabled bool
+var blockBots bool
+var verifyIPReputation bool
+var geoAllow map[string]struct{}
+var geoBlock map[string]struct{}
+```
+
+<ResponseField name="geoDB" type="*geoip2.Reader">
+  MaxMind GeoIP2 database reader instance
+</ResponseField>
+
+<ResponseField name="geoBlockEnabled" type="bool">
+  Whether GeoIP filtering is enabled
+</ResponseField>
+
+<ResponseField name="geoAllow" type="map[string]struct{}">
+  Set of allowed country codes
+</ResponseField>
+
+<ResponseField name="geoBlock" type="map[string]struct{}">
+  Set of blocked country codes
+</ResponseField>
+
+## Environment Variables
+
+See [Environment Variables](/api/environment-variables) for configuration:
+
+- `GEO_BLOCK_ENABLED` - Enable/disable GeoIP filtering
+- `GEO_ALLOW_COUNTRIES` - Comma-separated allowlist
+- `GEO_BLOCK_COUNTRIES` - Comma-separated blocklist
+
+## Complete Example
+
+### Configuration
+
+```bash
+export GEO_BLOCK_ENABLED=true
+export GEO_ALLOW_COUNTRIES="US,CA,GB,DE,FR"
+export GEO_BLOCK_COUNTRIES="CN,RU,KP"
+```
+
+### Behavior
+
+| IP Location | Result | Reason |
+|------------|--------|--------|
+| United States (US) | Allowed | In allowlist |
+| Canada (CA) | Allowed | In allowlist |
+| China (CN) | Blocked | In blocklist (takes precedence) |
+| Russia (RU) | Blocked | In blocklist |
+| Japan (JP) | Blocked | Not in allowlist |
+| Germany (DE) | Allowed | In allowlist |
+
+### Code Flow
+
+```go
+// 1. Initialization
+geoBlockEnabled = getEnvBool("GEO_BLOCK_ENABLED", false)
+if geoBlockEnabled {
+    loadGeoIP("/app/GeoLite2-Country.mmdb")
+    geoAllow = parseCSVSet(os.Getenv("GEO_ALLOW_COUNTRIES"))
+    geoBlock = parseCSVSet(os.Getenv("GEO_BLOCK_COUNTRIES"))
+}
+
+// 2. Per-request filtering
+if geoBlockEnabled {
+    allowed, country := geoFilter(r, geoAllow, geoBlock)
+    if !allowed {
+        log.Printf("[GEO] blocked %s from %s", r.RemoteAddr, country)
+        http.Error(w, "Access denied by GeoIP policy", http.StatusForbidden)
+        return
+    }
+}
+```
+
+## Database Requirements
+
+<Info>
+  Requires MaxMind GeoLite2 or GeoIP2 Country database in `.mmdb` format. Download from [MaxMind](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data).
+</Info>
+
+Default path: `/app/GeoLite2-Country.mmdb`

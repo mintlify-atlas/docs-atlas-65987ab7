@@ -1,0 +1,382 @@
+---
+title: 'Environment Variables'
+description: 'Complete reference for all configuration environment variables'
+---
+
+## Overview
+
+Coraza Proxy is configured entirely through environment variables. This page documents all available variables with types, defaults, and usage examples.
+
+## Server Configuration
+
+### PORT
+
+HTTP server listening port.
+
+<ParamField path="PORT" type="string" default="8081">
+  Port number for the proxy server to listen on
+</ParamField>
+
+```bash
+PORT=8081
+```
+
+**Source**: main.go:177-186
+
+<Note>
+  If PORT is not set or contains invalid value, defaults to "8081"
+</Note>
+
+## Backend Routing
+
+### BACKENDS
+
+JSON configuration for backend server routing.
+
+<ParamField path="BACKENDS" type="JSON" default='{"default":["localhost:5000"]}'>
+  Backend routing configuration (supports host-based and path-based routing)
+</ParamField>
+
+**New Format** (with path routing):
+
+```json
+{
+  "example.com": {
+    "default": ["web:80", "web2:80"],
+    "paths": {
+      "/static": ["cdn:80"],
+      "/api": ["api:8080"]
+    }
+  }
+}
+```
+
+**Legacy Format** (host-only):
+
+```json
+{
+  "waf.test.local": ["web:80"],
+  "api.test.local": ["api:8082"],
+  "default": ["localhost:5000"]
+}
+```
+
+**Example from .env.example**:
+
+```bash
+BACKENDS='{"waf.test.local":["web:80"], "api.test.local":["api:8082"], "default":["localhost:5000"]}'
+```
+
+**Source**: main.go:97-161
+
+## WAF Configuration
+
+### CORAZA_RULES_PATH_SITES
+
+Colon-separated list of rule files for web sites (Paranoia Level 1).
+
+<ParamField path="CORAZA_RULES_PATH_SITES" type="string" default="/app/coraza.conf:/app/coreruleset/pl1-crs-setup.conf:/app/coreruleset/rules/*.conf">
+  WAF rules for regular web applications
+</ParamField>
+
+```bash
+CORAZA_RULES_PATH_SITES="coraza.conf:profiles/pl1-crs-setup.conf:coreruleset/rules/*.conf"
+```
+
+**Source**: main.go:381-384
+
+### CORAZA_RULES_PATH_APIS
+
+Colon-separated list of rule files for APIs (Paranoia Level 2).
+
+<ParamField path="CORAZA_RULES_PATH_APIS" type="string" default="/app/coraza.conf:/app/coreruleset/pl2-crs-setup.conf:/app/coreruleset/rules/REQUEST-901-INITIALIZATION.conf:/app/coreruleset/rules/*.conf">
+  WAF rules for API endpoints (stricter rules)
+</ParamField>
+
+```bash
+CORAZA_RULES_PATH_APIS="coraza.conf:profiles/pl2-crs-setup.conf:coreruleset/rules/REQUEST-901-INITIALIZATION.conf:coreruleset/rules/*.conf"
+```
+
+**Source**: main.go:387-390
+
+### PROXY_WEB_HOSTS
+
+Comma-separated list of hostnames to apply web site WAF rules.
+
+<ParamField path="PROXY_WEB_HOSTS" type="string" default="">
+  Hostnames that use CORAZA_RULES_PATH_SITES rules
+</ParamField>
+
+```bash
+PROXY_WEB_HOSTS=waf.test.local
+```
+
+**Source**: main.go:410, 468-470
+
+### PROXY_APIS_HOSTS
+
+Comma-separated list of hostnames to apply API WAF rules.
+
+<ParamField path="PROXY_APIS_HOSTS" type="string" default="">
+  Hostnames that use CORAZA_RULES_PATH_APIS rules
+</ParamField>
+
+```bash
+PROXY_APIS_HOSTS=api.test.local
+```
+
+**Source**: main.go:409, 464-466
+
+## Rate Limiting
+
+### PROXY_RATE_LIMIT
+
+Maximum requests per second per IP address.
+
+<ParamField path="PROXY_RATE_LIMIT" type="int" default="5">
+  Rate limit in requests per second
+</ParamField>
+
+```bash
+PROXY_RATE_LIMIT=5
+```
+
+**Source**: main.go:412-413
+
+### PROXY_RATE_BURST
+
+Maximum burst size for rate limiting.
+
+<ParamField path="PROXY_RATE_BURST" type="int" default="10">
+  Burst size (maximum requests allowed in a burst)
+</ParamField>
+
+```bash
+PROXY_RATE_BURST=10
+```
+
+**Source**: main.go:412-414
+
+**Usage Example**:
+
+```go main.go:412-415
+limiter := NewIPRateLimiter(
+    rate.Limit(getEnvInt("PROXY_RATE_LIMIT", 5)),
+    getEnvInt("PROXY_RATE_BURST", 10),
+)
+```
+
+## Bot Protection
+
+### PROXY_BLOCK_BOTS
+
+Enable or disable bot blocking.
+
+<ParamField path="PROXY_BLOCK_BOTS" type="bool" default="false">
+  Whether to block requests from known bots
+</ParamField>
+
+```bash
+PROXY_BLOCK_BOTS=false
+```
+
+**Source**: main.go:375, 447
+
+### PROXY_BOTS
+
+Comma-separated list of bot user-agent substrings to block.
+
+<ParamField path="PROXY_BOTS" type="string" default="python,googlebot,bingbot,yandex,baiduspider">
+  Bot identifiers to block (case-insensitive substring match)
+</ParamField>
+
+```bash
+PROXY_BOTS=python,Googlebot,Bingbot,Slurp,DuckDuckBot,yandex,YandexBot,Sogou,baiduspider
+```
+
+**Source**: main.go:449
+
+**Bot Blocking Logic** (main.go:447-458):
+
+```go
+if blockBots {
+    ua := strings.ToLower(r.UserAgent())
+    envBots := getEnvString("PROXY_BOTS", "python,googlebot,bingbot,yandex,baiduspider")
+    badBots := strings.Split(envBots, ",")
+    for _, bot := range badBots {
+        if strings.Contains(ua, bot) {
+            log.Println("Bot blocked", clientIP)
+            http.Error(w, "Bot blocked", http.StatusForbidden)
+            return
+        }
+    }
+}
+```
+
+## GeoIP Filtering
+
+### GEO_BLOCK_ENABLED
+
+Enable or disable geographic IP filtering.
+
+<ParamField path="GEO_BLOCK_ENABLED" type="bool" default="false">
+  Whether to enable GeoIP-based access control
+</ParamField>
+
+```bash
+GEO_BLOCK_ENABLED=false
+```
+
+**Source**: main.go:370-373
+
+<Warning>
+  Requires GeoLite2-Country.mmdb database at `/app/GeoLite2-Country.mmdb`
+</Warning>
+
+### GEO_ALLOW_COUNTRIES
+
+Comma-separated list of allowed country codes (ISO 3166-1 alpha-2).
+
+<ParamField path="GEO_ALLOW_COUNTRIES" type="string" default="">
+  Allowlist of country codes (empty = allow all except blocked)
+</ParamField>
+
+```bash
+GEO_ALLOW_COUNTRIES=US,CA,GB,DE,FR
+```
+
+**Source**: main.go:418
+
+### GEO_BLOCK_COUNTRIES
+
+Comma-separated list of blocked country codes (ISO 3166-1 alpha-2).
+
+<ParamField path="GEO_BLOCK_COUNTRIES" type="string" default="">
+  Blocklist of country codes (takes precedence over allowlist)
+</ParamField>
+
+```bash
+GEO_BLOCK_COUNTRIES=CN,RU,KP
+```
+
+**Source**: main.go:419
+
+<Info>
+  Country codes are automatically converted to uppercase. Blocklist takes precedence over allowlist.
+</Info>
+
+## IP Reputation (Placeholder)
+
+### PROXY_VERIFY_IP_REPUTATION
+
+Placeholder for future IP reputation verification.
+
+<ParamField path="PROXY_VERIFY_IP_REPUTATION" type="bool" default="false">
+  Reserved for future IP reputation checking feature
+</ParamField>
+
+```bash
+PROXY_VERIFY_IP_REPUTATION=false
+```
+
+**Source**: main.go:51, 428-430
+
+<Note>
+  Currently only logs when enabled. No actual reputation check is performed.
+</Note>
+
+## Helper Functions
+
+These internal functions read environment variables:
+
+### getEnvString()
+
+```go main.go:227-232
+func getEnvString(key string, d string) string {
+    if value, ok := os.LookupEnv(key); ok {
+        return value
+    }
+    return d
+}
+```
+
+Returns environment variable value or default string.
+
+### getEnvInt()
+
+```go main.go:235-240
+func getEnvInt(key string, d int) int {
+    if value, err := strconv.Atoi(getEnvString(key, "")); err == nil {
+        return value
+    }
+    return d
+}
+```
+
+Returns environment variable as integer or default value.
+
+### getEnvBool()
+
+```go main.go:242-247
+func getEnvBool(key string, d bool) bool {
+    if value, err := strconv.ParseBool(getEnvString(key, "")); err == nil {
+        return value
+    }
+    return d
+}
+```
+
+Returns environment variable as boolean or default value.
+
+## Complete Example Configuration
+
+```bash .env.example
+# Server
+PORT=8081
+
+# Backends
+BACKENDS='{"waf.test.local":["web:80"], "api.test.local":["api:8082"], "default":["localhost:5000"]}'
+
+# WAF Rules
+CORAZA_RULES_PATH_SITES="coraza.conf:profiles/pl1-crs-setup.conf:coreruleset/rules/*.conf"
+CORAZA_RULES_PATH_APIS="coraza.conf:profiles/pl2-crs-setup.conf:coreruleset/rules/REQUEST-901-INITIALIZATION.conf:coreruleset/rules/*.conf"
+
+# Host Classification
+PROXY_WEB_HOSTS=waf.test.local
+PROXY_APIS_HOSTS=api.test.local
+
+# Rate Limiting
+PROXY_RATE_LIMIT=5
+PROXY_RATE_BURST=10
+
+# Bot Protection
+PROXY_BLOCK_BOTS=false
+PROXY_BOTS=python,Googlebot,Bingbot,Slurp,DuckDuckBot,yandex,YandexBot,Sogou,baiduspider
+
+# GeoIP Filtering
+GEO_BLOCK_ENABLED=false
+GEO_ALLOW_COUNTRIES=US,CA,GB,DE,FR
+GEO_BLOCK_COUNTRIES=CN,RU,KP
+
+# IP Reputation (placeholder)
+PROXY_VERIFY_IP_REPUTATION=false
+```
+
+## Variable Summary Table
+
+| Variable | Type | Default | Source Lines |
+|----------|------|---------|-------------|
+| PORT | string | `"8081"` | 177-186 |
+| BACKENDS | JSON | `{"default":["localhost:5000"]}` | 97-161 |
+| CORAZA_RULES_PATH_SITES | string | `/app/coraza.conf:...` | 381-384 |
+| CORAZA_RULES_PATH_APIS | string | `/app/coraza.conf:...` | 387-390 |
+| PROXY_WEB_HOSTS | string | `""` | 410, 468-470 |
+| PROXY_APIS_HOSTS | string | `""` | 409, 464-466 |
+| PROXY_RATE_LIMIT | int | `5` | 412-413 |
+| PROXY_RATE_BURST | int | `10` | 412-414 |
+| PROXY_BLOCK_BOTS | bool | `false` | 375, 447 |
+| PROXY_BOTS | string | `"python,googlebot,..."` | 449 |
+| GEO_BLOCK_ENABLED | bool | `false` | 370-373 |
+| GEO_ALLOW_COUNTRIES | string | `""` | 418 |
+| GEO_BLOCK_COUNTRIES | string | `""` | 419 |
+| PROXY_VERIFY_IP_REPUTATION | bool | `false` | 51, 428-430 |

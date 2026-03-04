@@ -1,0 +1,303 @@
+---
+title: Docker Compose Setup
+description: Deploy Coraza Proxy with Docker Compose for multi-container orchestration and Traefik integration
+---
+
+## Overview
+
+Docker Compose simplifies deploying Coraza Proxy alongside backend services. The project includes two compose configurations:
+
+- **docker-compose.yml** - Basic multi-service setup
+- **docker-compose.traefik.yml** - Traefik reverse proxy integration
+
+## Basic Docker Compose Setup
+
+### Configuration
+
+The basic `docker-compose.yml` sets up Coraza Proxy with test backends:
+
+```yaml
+services:
+  wafsec:
+    image: wafsec:local
+    container_name: wafsec
+    restart: always
+    volumes:
+      - ./logs/:/tmp/log/coraza
+    ports:
+      - "8081:8081"
+    environment:
+      BACKENDS: |
+        {
+          "waf.test.local": ["web:80"],
+          "api.test.local": ["api:8082"],
+          "default": ["localhost:8080"]
+        }
+      CORAZA_RULES_PATH_APIS: >
+        /app/profiles/coraza.conf:
+        /app/profiles/pl2-crs-setup.conf:
+        /app/coreruleset/rules/REQUEST-901-INITIALIZATION.conf:
+        /app/coreruleset/rules/REQUEST-920-PROTOCOL-ENFORCEMENT.conf:
+        /app/coreruleset/rules/REQUEST-930-APPLICATION-ATTACK-LFI.conf:
+        /app/coreruleset/rules/REQUEST-941-APPLICATION-ATTACK-XSS.conf:
+        /app/coreruleset/rules/REQUEST-942-APPLICATION-ATTACK-SQLI.conf:
+        /app/coreruleset/rules/REQUEST-949-BLOCKING-EVALUATION.conf
+      CORAZA_RULES_PATH_SITES: >
+        /app/profiles/coraza.conf:
+        /app/profiles/pl1-crs-setup.conf:
+        /app/coreruleset/rules/REQUEST-901-INITIALIZATION.conf:
+        /app/coreruleset/rules/REQUEST-905-COMMON-EXCEPTIONS.conf:
+        /app/coreruleset/rules/REQUEST-911-METHOD-ENFORCEMENT.conf:
+        /app/coreruleset/rules/REQUEST-920-PROTOCOL-ENFORCEMENT.conf:
+        /app/coreruleset/rules/REQUEST-930-APPLICATION-ATTACK-LFI.conf:
+        /app/coreruleset/rules/REQUEST-931-APPLICATION-ATTACK-RFI.conf:
+        /app/coreruleset/rules/REQUEST-932-APPLICATION-ATTACK-RCE.conf:
+        /app/coreruleset/rules/REQUEST-941-APPLICATION-ATTACK-XSS.conf:
+        /app/coreruleset/rules/REQUEST-942-APPLICATION-ATTACK-SQLI.conf:
+        /app/coreruleset/rules/REQUEST-943-APPLICATION-ATTACK-SESSION-FIXATION.conf:
+        /app/coreruleset/rules/RESPONSE-955-WEB-SHELLS.conf
+      PROXY_APIS_HOSTS: "api.test.local"
+      PROXY_WEB_HOSTS: "waf.test.local"
+    networks:
+      - coraza
+
+  api:
+    build: ./docker/api
+    container_name: test_api
+    depends_on:
+      - wafsec
+    networks:
+      - coraza
+
+  web:
+    build: ./docker/web
+    container_name: test_web
+    depends_on:
+      - wafsec
+    networks:
+      - coraza
+
+networks:
+  coraza:
+    external: true
+```
+
+### Starting the Stack
+
+<Steps>
+  <Step title="Create the network">
+    ```bash
+    docker network create coraza
+    ```
+  </Step>
+  
+  <Step title="Build the image">
+    ```bash
+    docker build -t wafsec:local .
+    ```
+  </Step>
+  
+  <Step title="Start the services">
+    ```bash
+    docker-compose up -d
+    ```
+  </Step>
+  
+  <Step title="Verify services">
+    ```bash
+    docker-compose ps
+    docker-compose logs -f wafsec
+    ```
+  </Step>
+</Steps>
+
+### Key Features
+
+- **Volume Mounts**: Logs persisted to `./logs/` directory
+- **Restart Policy**: `always` ensures high availability
+- **Backend Routing**: Host-based routing to different backends
+- **Rule Separation**: Different rule sets for APIs (PL2) vs websites (PL1)
+
+## Traefik Integration
+
+### Configuration
+
+The `docker-compose.traefik.yml` integrates Coraza Proxy with Traefik reverse proxy:
+
+```yaml
+services:
+  traefik:
+    image: traefik:v2.11
+    container_name: traefik_coraza
+    restart: always
+    command:
+      - "--log.level=DEBUG"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedByDefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--api.dashboard=true"
+    ports:
+      - "80:80"     # HTTP
+      - "8080:8080" # Dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - internal_net
+      - proxy_net
+
+  wafsec:
+    image: wafsec:local
+    container_name: wafsec_coraza
+    restart: on-failure:5
+    depends_on:
+      - traefik
+    ports:
+      - "8081:8081"
+    environment:
+      BACKENDS: |
+        {
+          "waf.test.local": ["web:80"],
+          "api.test.local": ["api:8082"],
+          "default": ["web:80"]
+        }
+      WAF_APIS_HOSTS: "api.test.local"
+      WAF_WEB_HOSTS: "waf.test.local"
+      WAF_RATE_LIMIT: 5
+      WAF_RATE_BURST: 5
+    labels:
+      - "traefik.enable=true"
+      # --- waf.test.local ---
+      - "traefik.http.routers.waf.rule=Host(`waf.test.local`)"
+      - "traefik.http.routers.waf.entrypoints=web"
+      - "traefik.http.routers.waf.service=waf-service"
+      # --- api.test.local ---
+      - "traefik.http.routers.api.rule=Host(`api.test.local`)"
+      - "traefik.http.routers.api.entrypoints=web"
+      - "traefik.http.routers.api.service=waf-service"
+      - "traefik.http.services.waf-service.loadbalancer.server.port=8081"
+    networks:
+      - internal_net
+
+networks:
+  internal_net:
+    internal: true
+  proxy_net:
+    driver: bridge
+```
+
+### Network Architecture
+
+The Traefik setup uses two networks for security:
+
+- **proxy_net**: External traffic from Traefik to internet
+- **internal_net**: Internal communication between services (isolated)
+
+<Tip>
+Backend services (web, api) are on `internal_net` only, preventing direct external access.
+</Tip>
+
+### Traefik Labels Explained
+
+```yaml
+labels:
+  - "traefik.enable=true"  # Enable Traefik routing
+  
+  # Router for waf.test.local
+  - "traefik.http.routers.waf.rule=Host(`waf.test.local`)"
+  - "traefik.http.routers.waf.entrypoints=web"
+  - "traefik.http.routers.waf.service=waf-service"
+  
+  # Router for api.test.local
+  - "traefik.http.routers.api.rule=Host(`api.test.local`)"
+  - "traefik.http.routers.api.entrypoints=web"
+  - "traefik.http.routers.api.service=waf-service"
+  
+  # Service configuration
+  - "traefik.http.services.waf-service.loadbalancer.server.port=8081"
+```
+
+### Starting the Traefik Stack
+
+```bash
+# Build the image
+docker build -t wafsec:local .
+
+# Start the stack
+docker-compose -f docker-compose.traefik.yml up -d
+
+# View logs
+docker-compose -f docker-compose.traefik.yml logs -f
+
+# Access Traefik dashboard
+open http://localhost:8080
+```
+
+## Testing the Setup
+
+Add test domains to `/etc/hosts`:
+
+```bash
+127.0.0.1 waf.test.local
+127.0.0.1 api.test.local
+```
+
+Test the endpoints:
+
+```bash
+# Test website endpoint
+curl -H "Host: waf.test.local" http://localhost/
+
+# Test API endpoint
+curl -H "Host: api.test.local" http://localhost/api/status
+
+# Test WAF blocking (XSS attempt)
+curl -H "Host: waf.test.local" "http://localhost/?q=<script>alert(1)</script>"
+```
+
+## Production Considerations
+
+<Warning>
+For production deployments:
+- Use external secrets management for sensitive environment variables
+- Configure HTTPS with TLS certificates in Traefik
+- Implement proper log rotation for audit logs
+- Set resource limits on containers
+</Warning>
+
+### Resource Limits
+
+Add resource constraints to prevent resource exhaustion:
+
+```yaml
+wafsec:
+  image: wafsec:local
+  deploy:
+    resources:
+      limits:
+        cpus: '2'
+        memory: 1G
+      reservations:
+        cpus: '0.5'
+        memory: 512M
+```
+
+## Stopping Services
+
+```bash
+# Stop and remove containers
+docker-compose down
+
+# Stop and remove containers, volumes, and networks
+docker-compose down -v
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/deployment/configuration">
+    Detailed environment variable reference
+  </Card>
+  <Card title="Docker Deployment" icon="docker" href="/deployment/docker">
+    Standalone Docker deployment guide
+  </Card>
+</CardGroup>

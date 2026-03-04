@@ -1,0 +1,372 @@
+---
+title: GeoIP Blocking
+description: Block or allow traffic based on geographic location using MaxMind GeoIP2 database
+---
+
+## Overview
+
+Coraza Proxy supports geographic blocking and allowlisting using the MaxMind GeoIP2 Country database. You can either block specific countries or create an allowlist of permitted countries.
+
+## Environment Variables
+
+<ParamField path="GEO_BLOCK_ENABLED" type="boolean" default="false">
+  Enable or disable GeoIP-based filtering. Must be set to `true` to activate geolocation features.
+</ParamField>
+
+<ParamField path="GEO_BLOCK_COUNTRIES" type="string">
+  Comma-separated list of country codes (ISO 3166-1 alpha-2) to block.
+  
+  **Example**: `CN,RU,KP`
+</ParamField>
+
+<ParamField path="GEO_ALLOW_COUNTRIES" type="string">
+  Comma-separated list of country codes to allow. When set, all other countries are blocked.
+  
+  **Example**: `US,CA,GB,FR,DE`
+</ParamField>
+
+## How It Works
+
+### Database Loading
+
+The GeoIP database is loaded at startup if enabled (from `main.go:370-376`):
+
+```go
+geoBlockEnabled = getEnvBool("GEO_BLOCK_ENABLED", false)
+if geoBlockEnabled {
+    loadGeoIP("/app/GeoLite2-Country.mmdb")
+}
+```
+
+The database loading function (from `main.go:264-271`):
+
+```go
+func loadGeoIP(path string) {
+    var err error
+    geoDB, err = geoip2.Open(path)
+    if err != nil {
+        log.Fatalf("GeoIP DB error: %v", err)
+    }
+    log.Println("GeoIP database loaded")
+}
+```
+
+### Country Code Lookup
+
+Country codes are determined from IP addresses (from `main.go:273-283`):
+
+```go
+func getCountryCode(ipStr string) (string, error) {
+    ip := net.ParseIP(ipStr)
+    if ip == nil {
+        return "", fmt.Errorf("invalid IP")
+    }
+    record, err := geoDB.Country(ip)
+    if err != nil {
+        return "", err
+    }
+    return record.Country.IsoCode, nil
+}
+```
+
+### Configuration Parsing
+
+Country lists are parsed from environment variables (from `main.go:285-294`):
+
+```go
+func parseCSVSet(env string) map[string]struct{} {
+    out := map[string]struct{}{}
+    for _, c := range strings.Split(env, ",") {
+        c = strings.TrimSpace(strings.ToUpper(c))
+        if c != "" {
+            out[c] = struct{}{}
+        }
+    }
+    return out
+}
+```
+
+Country codes are loaded in main (from `main.go:417-420`):
+
+```go
+if geoBlockEnabled {
+    geoAllow = parseCSVSet(os.Getenv("GEO_ALLOW_COUNTRIES"))
+    geoBlock = parseCSVSet(os.Getenv("GEO_BLOCK_COUNTRIES"))
+}
+```
+
+### Filtering Logic
+
+The geo filtering function implements the allowlist/blocklist logic (from `main.go:296-315`):
+
+```go
+func geoFilter(r *http.Request, allow, block map[string]struct{}) (bool, string) {
+    ip, _ := splitHostPort(r.RemoteAddr)
+
+    country, err := getCountryCode(ip)
+    if err != nil {
+        return false, "geo lookup failed"
+    }
+
+    if _, blocked := block[country]; blocked {
+        return false, "geo blocked"
+    }
+
+    if len(allow) > 0 {
+        if _, ok := allow[country]; !ok {
+            return false, "geo not allowed"
+        }
+    }
+
+    return true, country
+}
+```
+
+### Request Handling
+
+GeoIP filtering is applied early in the request pipeline (from `main.go:432-439`):
+
+```go
+if geoBlockEnabled {
+    allowed, country := geoFilter(r, geoAllow, geoBlock)
+    if !allowed {
+        log.Printf("[GEO] blocked %s from %s", r.RemoteAddr, country)
+        http.Error(w, "Access denied by GeoIP policy", http.StatusForbidden)
+        return
+    }
+}
+```
+
+## Filtering Modes
+
+### Mode 1: Block Specific Countries
+
+Block a list of countries while allowing all others:
+
+```bash
+GEO_BLOCK_ENABLED=true
+GEO_BLOCK_COUNTRIES=CN,RU,KP,IR
+```
+
+**Logic**:
+- If country is in blocklist → Block (403)
+- Otherwise → Allow
+
+### Mode 2: Allow Only Specific Countries
+
+Allow only a specific list of countries:
+
+```bash
+GEO_BLOCK_ENABLED=true
+GEO_ALLOW_COUNTRIES=US,CA,GB,FR,DE,AU
+```
+
+**Logic**:
+- If country is in allowlist → Allow
+- Otherwise → Block (403)
+
+### Mode 3: Combined (Allow Takes Precedence)
+
+You can combine both, but the allowlist takes precedence:
+
+```bash
+GEO_BLOCK_ENABLED=true
+GEO_ALLOW_COUNTRIES=US,CA,MX
+GEO_BLOCK_COUNTRIES=MX  # This will be ignored for MX since it's in the allowlist
+```
+
+**Logic**:
+1. Check blocklist first → If matched, block
+2. Check allowlist (if configured) → If not matched, block
+3. Otherwise → Allow
+
+## Country Codes
+
+Use ISO 3166-1 alpha-2 country codes. Common examples:
+
+| Code | Country |
+|------|----------|
+| US | United States |
+| CA | Canada |
+| GB | United Kingdom |
+| FR | France |
+| DE | Germany |
+| CN | China |
+| RU | Russia |
+| JP | Japan |
+| AU | Australia |
+| BR | Brazil |
+| IN | India |
+| KP | North Korea |
+| IR | Iran |
+
+[Full list of country codes](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2)
+
+## Configuration Examples
+
+### Block High-Risk Countries
+
+```bash
+GEO_BLOCK_ENABLED=true
+GEO_BLOCK_COUNTRIES=CN,RU,KP,IR,BY
+```
+
+### Allow Only North America
+
+```bash
+GEO_BLOCK_ENABLED=true
+GEO_ALLOW_COUNTRIES=US,CA,MX
+```
+
+### Allow Only Europe
+
+```bash
+GEO_BLOCK_ENABLED=true
+GEO_ALLOW_COUNTRIES=GB,FR,DE,IT,ES,NL,BE,CH,AT,SE,NO,DK,FI,IE,PT,PL,CZ,HU,RO,BG,GR
+```
+
+### Block Specific Regions
+
+```bash
+GEO_BLOCK_ENABLED=true
+# Block Eastern Europe and Asia
+GEO_BLOCK_COUNTRIES=RU,UA,BY,KZ,CN,KP,VN,LA,MM
+```
+
+## Docker Setup
+
+The GeoIP database must be mounted into the container:
+
+```yaml
+version: '3.8'
+
+services:
+  proxy:
+    image: coraza-proxy
+    environment:
+      GEO_BLOCK_ENABLED: "true"
+      GEO_ALLOW_COUNTRIES: "US,CA,GB,FR,DE"
+      BACKENDS: '{"default": {"default": ["app:3000"]}}'
+    volumes:
+      - ./GeoLite2-Country.mmdb:/app/GeoLite2-Country.mmdb:ro
+    ports:
+      - "8081:8081"
+```
+
+## Obtaining the GeoIP Database
+
+### MaxMind GeoLite2 (Free)
+
+1. Sign up for a free account at [MaxMind](https://www.maxmind.com/en/geolite2/signup)
+2. Download the GeoLite2 Country database (MMDB format)
+3. Extract `GeoLite2-Country.mmdb`
+4. Mount it to `/app/GeoLite2-Country.mmdb` in the container
+
+### Commercial Database
+
+For more accurate data, use MaxMind's commercial GeoIP2 database:
+
+1. Purchase GeoIP2 Country database
+2. Download and extract
+3. Use the same mount path
+
+## Response Format
+
+When a request is blocked by GeoIP policy:
+
+```http
+HTTP/1.1 403 Forbidden
+Content-Type: text/plain; charset=utf-8
+
+Access denied by GeoIP policy
+```
+
+## Logging
+
+GeoIP blocks are logged with details:
+
+```
+2024/01/15 10:30:45 [GEO] blocked 203.0.113.42 from CN
+2024/01/15 10:31:12 [GEO] blocked 198.51.100.23 from RU
+```
+
+Successful loads are also logged:
+
+```
+2024/01/15 10:00:00 GeoIP database loaded
+```
+
+## Error Handling
+
+### Missing Database File
+
+If the database file is missing when `GEO_BLOCK_ENABLED=true`:
+
+```
+GeoIP DB error: open /app/GeoLite2-Country.mmdb: no such file or directory
+```
+
+The proxy will exit with a fatal error.
+
+### Invalid IP Address
+
+If the IP cannot be parsed, the request is blocked:
+
+```go
+if err != nil {
+    return false, "geo lookup failed"
+}
+```
+
+### IP Not in Database
+
+If the IP is not found in the database (e.g., private IPs), the lookup fails and the request is blocked by default.
+
+## Behind Proxies
+
+The GeoIP lookup uses the real client IP extracted from headers (see [Rate Limiting](/configuration/rate-limiting) for IP detection details):
+
+```go
+ip, _ := splitHostPort(r.RemoteAddr)
+```
+
+Ensure your proxy (Cloudflare, Nginx, etc.) forwards the real client IP in:
+- `CF-Connecting-IP` (Cloudflare)
+- `X-Forwarded-For` (standard)
+
+## Performance Considerations
+
+- The GeoIP database is loaded into memory once at startup
+- Lookups are extremely fast (microseconds)
+- Negligible performance impact per request
+- Database size: ~6 MB for GeoLite2-Country
+
+## Testing
+
+Test GeoIP blocking with VPN or proxy services:
+
+```bash
+# Test with curl through a proxy
+curl -x socks5://proxy-in-cn:1080 http://your-proxy:8081/
+
+# Expected response:
+Access denied by GeoIP policy
+```
+
+## Best Practices
+
+1. **Use allowlist for critical apps**: For sensitive applications, use `GEO_ALLOW_COUNTRIES` to explicitly permit only trusted regions
+2. **Update database regularly**: GeoLite2 should be updated monthly for accuracy
+3. **Monitor logs**: Review blocked requests to ensure legitimate users aren't affected
+4. **Combine with WAF**: Use GeoIP as a first layer before WAF processing
+5. **Test before production**: Verify your country codes work as expected
+6. **Consider false positives**: VPNs and proxies can cause misidentification
+7. **Document your policy**: Maintain a clear list of why countries are blocked/allowed
+
+## Limitations
+
+- GeoIP databases are not 100% accurate
+- VPNs and proxies can bypass geographic restrictions
+- Private IP addresses (10.x.x.x, 192.168.x.x) cannot be geolocated
+- Database must be updated regularly for accuracy
+- No built-in automatic database updates (implement separately)

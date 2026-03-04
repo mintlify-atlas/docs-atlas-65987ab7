@@ -1,0 +1,292 @@
+---
+title: Rate Limiting
+description: Configure per-IP rate limiting with customizable limits and burst values
+---
+
+## Overview
+
+Coraza Proxy includes built-in per-IP rate limiting using the token bucket algorithm. This protects your backend services from abuse and ensures fair resource distribution across clients.
+
+## Environment Variables
+
+<ParamField path="PROXY_RATE_LIMIT" type="number" default="5">
+  Maximum number of requests per second allowed per IP address.
+</ParamField>
+
+<ParamField path="PROXY_RATE_BURST" type="number" default="10">
+  Maximum burst size - the number of requests that can be made in a short burst above the rate limit.
+</ParamField>
+
+## How It Works
+
+### Data Structures
+
+The rate limiter uses these structures (from `main.go:29-40`):
+
+```go
+// IPRateLimiter manage the rate limit for IP
+type IPRateLimiter struct {
+    ips map[string]*visitor
+    mu  sync.Mutex
+    r   rate.Limit
+    b   int
+}
+
+type visitor struct {
+    limiter  *rate.Limiter
+    lastSeen time.Time
+}
+```
+
+### Initialization
+
+The rate limiter is created at startup (from `main.go:55-64`):
+
+```go
+// NewIPRateLimiter creates and initializes a new IPRateLimiter with the specified rate limit and burst size.
+func NewIPRateLimiter(r rate.Limit, b int) *IPRateLimiter {
+    i := &IPRateLimiter{
+        ips: make(map[string]*visitor),
+        r:   r,
+        b:   b,
+    }
+    go i.cleanupVisitors()
+    return i
+}
+```
+
+And initialized in main (from `main.go:412-415`):
+
+```go
+limiter := NewIPRateLimiter(
+    rate.Limit(getEnvInt("PROXY_RATE_LIMIT", 5)),
+    getEnvInt("PROXY_RATE_BURST", 10),
+)
+```
+
+### Per-IP Limiter
+
+Each IP address gets its own rate limiter (from `main.go:66-81`):
+
+```go
+// GetLimiter returns a rate limiter for the specified IP address, creating a new one if it does not exist,
+// and updates its last seen time.
+func (i *IPRateLimiter) GetLimiter(ip string) *rate.Limiter {
+    i.mu.Lock()
+    defer i.mu.Unlock()
+
+    v, exists := i.ips[ip]
+    if !exists {
+        limiter := rate.NewLimiter(i.r, i.b)
+        i.ips[ip] = &visitor{limiter, time.Now()}
+        return limiter
+    }
+
+    v.lastSeen = time.Now()
+    return v.limiter
+}
+```
+
+### Automatic Cleanup
+
+Inactive IP addresses are removed from memory (from `main.go:83-95`):
+
+```go
+// cleanupVisitors removes inactive visitors from the IP map based on the configured inactivity duration.
+func (i *IPRateLimiter) cleanupVisitors() {
+    for {
+        time.Sleep(time.Minute)
+        i.mu.Lock()
+        for ip, v := range i.ips {
+            if time.Since(v.lastSeen) > 3*time.Minute {
+                delete(i.ips, ip)
+            }
+        }
+        i.mu.Unlock()
+    }
+}
+```
+
+Visitors are automatically removed after 3 minutes of inactivity to prevent memory leaks.
+
+### Request Handling
+
+Each request is checked against the rate limiter (from `main.go:441-445`):
+
+```go
+if !limiter.GetLimiter(clientIP).Allow() {
+    log.Println("Too Many Requests - IP blocked", clientIP)
+    http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+    return
+}
+```
+
+### Client IP Detection
+
+The real client IP is extracted from headers or remote address (from `main.go:249-262`):
+
+```go
+// realClientIP extracts the client's real IP address from HTTP headers or the remote address.
+// It checks headers "CF-Connecting-IP" and "X-Forwarded-For" for proxy configurations.
+func realClientIP(r *http.Request) string {
+    if cf := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cf != "" {
+        return cf
+    }
+    if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+        // primer IP del XFF
+        parts := strings.Split(xff, ",")
+        return strings.TrimSpace(parts[0])
+    }
+    host, _ := splitHostPort(r.RemoteAddr)
+    return host
+}
+```
+
+This ensures rate limiting works correctly behind proxies like Cloudflare or load balancers.
+
+## Token Bucket Algorithm
+
+The rate limiter uses the token bucket algorithm:
+
+1. Each IP gets a bucket that holds tokens
+2. Tokens are added to the bucket at the rate defined by `PROXY_RATE_LIMIT`
+3. The bucket can hold up to `PROXY_RATE_BURST` tokens
+4. Each request consumes one token
+5. If no tokens are available, the request is rejected with HTTP 429
+
+### Example Calculation
+
+With default settings (`PROXY_RATE_LIMIT=5`, `PROXY_RATE_BURST=10`):
+
+- **Sustained rate**: 5 requests per second
+- **Burst capacity**: Can make 10 requests instantly
+- **Recovery**: Bucket refills at 5 tokens/second
+
+**Scenario**:
+1. User makes 10 requests instantly → All succeed (burst consumed)
+2. User makes 1 more request immediately → Rejected (no tokens)
+3. After 0.2 seconds → 1 token available
+4. After 1 second → 5 tokens available
+5. After 2 seconds → Bucket full again (10 tokens)
+
+## Configuration Examples
+
+### Strict Rate Limiting
+
+```bash
+# Very restrictive: 2 requests/second, burst of 5
+PROXY_RATE_LIMIT=2
+PROXY_RATE_BURST=5
+```
+
+### Lenient Rate Limiting
+
+```bash
+# More permissive: 20 requests/second, burst of 50
+PROXY_RATE_LIMIT=20
+PROXY_RATE_BURST=50
+```
+
+### API Usage
+
+```bash
+# Good for APIs: 10 requests/second, burst of 20
+PROXY_RATE_LIMIT=10
+PROXY_RATE_BURST=20
+```
+
+### Development Mode
+
+```bash
+# Essentially unlimited for development
+PROXY_RATE_LIMIT=1000
+PROXY_RATE_BURST=2000
+```
+
+## Docker Compose Example
+
+```yaml
+version: '3.8'
+
+services:
+  proxy:
+    image: coraza-proxy
+    environment:
+      PROXY_RATE_LIMIT: 10
+      PROXY_RATE_BURST: 20
+      BACKENDS: '{"default": {"default": ["app:3000"]}}'
+    ports:
+      - "8081:8081"
+
+  app:
+    image: your-app:latest
+```
+
+## Response Headers
+
+When a client is rate limited, they receive:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Content-Type: text/plain; charset=utf-8
+
+Too Many Requests
+```
+
+## Monitoring
+
+Rate limit events are logged:
+
+```
+2024/01/15 10:30:45 Too Many Requests - IP blocked 203.0.113.42
+```
+
+You can monitor these logs to:
+- Detect potential DDoS attacks
+- Identify problematic clients
+- Tune rate limit parameters
+- Analyze traffic patterns
+
+## Behind Cloudflare or Load Balancers
+
+The rate limiter correctly identifies client IPs when behind proxies:
+
+1. **Cloudflare**: Uses `CF-Connecting-IP` header
+2. **Load Balancers**: Uses `X-Forwarded-For` header (first IP)
+3. **Direct Connection**: Uses `RemoteAddr`
+
+This ensures each real client is rate limited independently, not the proxy's IP.
+
+## Memory Management
+
+- Each IP address consumes approximately 200 bytes of memory
+- Inactive IPs are removed after 3 minutes
+- The cleanup goroutine runs every minute
+- Thread-safe with mutex protection
+
+**Example**: With 10,000 active IPs:
+- Memory usage: ~2 MB
+- After 3 minutes of inactivity: Memory freed
+
+## Best Practices
+
+1. **Start conservative**: Begin with lower limits and increase as needed
+2. **Monitor logs**: Watch for legitimate users hitting limits
+3. **Consider use case**: APIs need different limits than websites
+4. **Burst size**: Set burst to 2x the rate limit for normal traffic spikes
+5. **Combine with WAF**: Rate limiting complements WAF protection
+6. **Test your limits**: Use load testing to verify settings work for your traffic
+
+## Limitations
+
+- Rate limits are per-proxy instance (not shared across multiple instances)
+- For distributed rate limiting, consider using Redis or a similar solution
+- The current implementation doesn't support whitelisting specific IPs
+
+## Performance Impact
+
+The rate limiter is highly efficient:
+- O(1) lookup for existing IPs
+- Minimal CPU overhead per request
+- Automatic memory cleanup
+- Thread-safe concurrent access

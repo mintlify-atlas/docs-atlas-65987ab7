@@ -1,0 +1,172 @@
+---
+title: Monitoring
+description: Monitor the Coraza Proxy health, performance, and security metrics
+---
+
+Monitoring your Coraza Proxy deployment is essential for maintaining security and performance. This guide covers key metrics, log files, and health check strategies.
+
+## Health Checks
+
+The proxy listens on the port defined by the `PORT` environment variable (default: 8081). You can verify the proxy is running:
+
+```bash
+curl -I http://localhost:8081/
+```
+
+A successful response indicates the proxy is accepting connections. Note that the response will depend on your backend configuration and WAF rules.
+
+## Key Metrics to Monitor
+
+### Connection Metrics
+
+**Active Connections**
+- Monitor concurrent connections to detect traffic spikes
+- High connection counts may indicate DDoS attempts
+- See main.go:424-596 for request handling flow
+
+**Backend Health**
+- Track successful vs. failed backend connections
+- Monitor for "Bad Gateway" errors (HTTP 502)
+- Backend failures are logged with: `Bad Gateway: <error>` (main.go:563)
+
+### Security Metrics
+
+**WAF Blocks**
+Monitor these block events in your application logs:
+
+```
+Request blocked by WAF (headers)
+Request blocked by WAF (body)
+Response blocked by WAF
+```
+
+These indicate the WAF is actively protecting your application. Track the rate of blocks:
+- Sudden spikes may indicate an attack
+- Consistent blocks from specific IPs warrant investigation
+
+**Rate Limiting**
+```
+Too Many Requests - IP blocked <IP_ADDRESS>
+```
+
+Monitor rate limit events to:
+- Identify abusive clients
+- Tune rate limits (see `PROXY_RATE_LIMIT` and `PROXY_RATE_BURST` environment variables)
+- Default: 5 requests/second with burst of 10 (main.go:412-415)
+
+**GeoIP Blocking**
+When `GEO_BLOCK_ENABLED=true`, monitor:
+```
+[GEO] blocked <IP> from <COUNTRY_CODE>
+```
+
+**Bot Blocking**
+When `PROXY_BLOCK_BOTS=true`, monitor:
+```
+Bot blocked <IP_ADDRESS>
+```
+
+Default blocked user agents include: python, googlebot, bingbot, yandex, baiduspider (main.go:449)
+
+### Performance Indicators
+
+**Response Times**
+Monitor end-to-end latency including:
+- WAF inspection time
+- Backend response time
+- Network overhead
+
+**Memory Usage**
+The proxy maintains in-memory state for:
+- IP rate limiters (cleaned up after 3 minutes of inactivity - main.go:89)
+- WAF transaction processing
+- Request/response buffering
+
+**CPU Usage**
+CPU usage increases with:
+- WAF rule complexity (PL1 vs PL2 paranoia levels)
+- Request body inspection
+- High request rates
+
+## Log Files to Monitor
+
+See the [Logging](/operations/logging) page for detailed information about log files and their locations.
+
+### Application Logs (stdout)
+
+Key startup messages:
+```
+GeoIP database loaded
+Coraza WAF started
+Listening on :8081
+```
+
+Key runtime messages:
+```
+Processing request for <HOST>
+WAF not configured for host: <HOST>
+Error closing WAF transaction: <ERROR>
+Error closing backend response body: <ERROR>
+```
+
+### Audit Logs
+
+Location: `/tmp/log/coraza/audit.log`
+
+Contains WAF transaction details in JSON format (SecAuditLogFormat JSON). Monitor this file for:
+- Detailed attack patterns
+- Rule matches and scores
+- Full request/response data for blocked requests
+
+### Debug Logs
+
+Location: `/tmp/log/coraza/debug.log`
+
+By default, debug logging is disabled (`SecDebugLogLevel 0`). Enable for troubleshooting by setting `SecDebugLogLevel` to 1-9 in your Coraza configuration.
+
+## Monitoring Best Practices
+
+### Alert Thresholds
+
+Recommended alerts:
+
+1. **High WAF block rate**: >10% of requests blocked
+2. **Backend failures**: >5% error rate
+3. **Rate limit hits**: Same IP hitting limits repeatedly
+4. **Memory growth**: Sustained memory increase over time
+5. **GeoIP lookup failures**: `geo lookup failed` messages
+
+### Log Aggregation
+
+Consider shipping logs to a centralized system:
+- Parse JSON audit logs for structured analysis
+- Correlate WAF blocks with backend errors
+- Create dashboards for security metrics
+- Set up alerting on anomalous patterns
+
+### Metrics Collection
+
+Integrate with monitoring tools:
+- Export custom metrics from application logs
+- Track request counts by host, status code, and block reason
+- Monitor rate limiter state and cleanup cycles
+- Graph backend selection and round-robin distribution
+
+## Performance Tuning
+
+Based on monitoring data, tune these parameters:
+
+- **Rate limits**: Adjust `PROXY_RATE_LIMIT` and `PROXY_RATE_BURST`
+- **Body limits**: Modify `SecRequestBodyLimit` (default: 13107200 bytes)
+- **Paranoia level**: Balance security vs. performance (PL1 vs PL2)
+- **Backend configuration**: Optimize backend pool size and health checks
+
+## Health Check Endpoints
+
+The proxy doesn't expose dedicated health endpoints. Monitor health by:
+
+1. **Process health**: Ensure the process is running
+2. **Port availability**: Verify the configured PORT is listening
+3. **Backend connectivity**: Test end-to-end requests
+4. **Log activity**: Check for recent log entries
+5. **WAF initialization**: Verify startup messages in logs

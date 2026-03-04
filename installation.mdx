@@ -1,0 +1,689 @@
+---
+title: Installation
+description: Detailed installation and configuration guide for Coraza Proxy
+---
+
+## Prerequisites
+
+Before installing Coraza Proxy, ensure you have:
+
+- **Go 1.24+** (for building from source)
+- **Docker** (for containerized deployment)
+- **Git** (for cloning dependencies)
+- **Linux/macOS** (Windows via WSL2)
+
+<Note>
+Coraza Proxy requires Go 1.24.7 or higher due to dependencies in the Coraza v3 library.
+</Note>
+
+## Installation Methods
+
+<Tabs>
+  <Tab title="Docker (Recommended)">
+    ### Docker Installation
+    
+    The Docker image includes all dependencies including OWASP Core Rule Set.
+    
+    <Steps>
+      <Step title="Clone the Repository">
+        ```bash
+        git clone https://github.com/alexperezortuno/go-coraza.git
+        cd go-coraza
+        ```
+      </Step>
+      
+      <Step title="Build the Docker Image">
+        ```bash
+        docker build --no-cache -t wafsec:local .
+        ```
+        
+        This multi-stage build:
+        - Uses Go 1.24 Alpine as the builder
+        - Clones OWASP Core Rule Set
+        - Compiles the Go binary
+        - Creates a minimal Alpine runtime image
+        - Runs as non-root user `coraza`
+      </Step>
+      
+      <Step title="Run the Container">
+        ```bash
+        docker run -d \
+          --name coraza-proxy \
+          -p 8081:8081 \
+          -v $(pwd)/profiles:/app/profiles:ro \
+          -e BACKENDS='{"default":["host.docker.internal:5000"]}' \
+          -e PROXY_WEB_HOSTS=localhost \
+          wafsec:local
+        ```
+      </Step>
+    </Steps>
+    
+    <Info>
+    The Docker image automatically creates log directories at `/tmp/log/coraza/` with proper permissions for the `coraza` user.
+    </Info>
+  </Tab>
+  
+  <Tab title="Build from Source">
+    ### Building from Source
+    
+    <Steps>
+      <Step title="Install Go">
+        Ensure Go 1.24+ is installed:
+        
+        ```bash
+        go version
+        # Should output: go version go1.24.7 or higher
+        ```
+      </Step>
+      
+      <Step title="Clone Repository">
+        ```bash
+        git clone https://github.com/alexperezortuno/go-coraza.git
+        cd go-coraza
+        ```
+      </Step>
+      
+      <Step title="Download Dependencies">
+        ```bash
+        # Get Go dependencies
+        go mod tidy
+        
+        # Clone OWASP Core Rule Set
+        git clone --depth 1 https://github.com/coreruleset/coreruleset
+        ```
+        
+        <Accordion title="Key Dependencies">
+          From `go.mod`:
+          - `github.com/corazawaf/coraza/v3 v3.3.3` - Core WAF engine
+          - `github.com/oschwald/geoip2-golang v1.13.0` - GeoIP lookups
+          - `golang.org/x/time v0.14.0` - Rate limiting
+          - `github.com/corazawaf/libinjection-go` - SQL injection detection
+        </Accordion>
+      </Step>
+      
+      <Step title="Build the Binary">
+        ```bash
+        go build -o ./dist/coraza-proxy main.go
+        ```
+        
+        For production with optimizations:
+        
+        ```bash
+        CGO_ENABLED=0 go build \
+          -ldflags="-s -w" \
+          -o ./dist/coraza-proxy \
+          main.go
+        ```
+        
+        <Tip>
+        The `-ldflags="-s -w"` flags strip debug information, reducing binary size by ~30%.
+        </Tip>
+      </Step>
+      
+      <Step title="Set Up Configuration">
+        Create required directories:
+        
+        ```bash
+        mkdir -p /tmp/log/coraza
+        touch /tmp/log/coraza/audit.log
+        touch /tmp/log/coraza/debug.log
+        chmod 644 /tmp/log/coraza/*.log
+        ```
+      </Step>
+      
+      <Step title="Run the Binary">
+        ```bash
+        export BACKENDS='{"default":["localhost:5000"]}'
+        export PORT=8081
+        export PROXY_WEB_HOSTS=localhost
+        
+        ./dist/coraza-proxy
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Configuration
+
+### Environment Variables
+
+Coraza Proxy is configured entirely through environment variables:
+
+#### Core Settings
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `PORT` | integer | `8081` | Port to listen on |
+| `BACKENDS` | JSON | See below | Backend routing configuration |
+| `CORAZA_RULES_PATH_SITES` | paths | PL1 config | Colon-separated rule file paths for web sites |
+| `CORAZA_RULES_PATH_APIS` | paths | PL2 config | Colon-separated rule file paths for APIs |
+
+#### Host Classification
+
+```bash
+# Hosts using web site rules (PL1)
+PROXY_WEB_HOSTS=web.example.com,www.example.com
+
+# Hosts using API rules (PL2)
+PROXY_APIS_HOSTS=api.example.com,v1.example.com
+```
+
+<Warning>
+Each host must be classified as either WEB or API. Unclassified hosts will return `WAF not configured for this host` errors.
+</Warning>
+
+#### Rate Limiting
+
+```bash
+# Requests per second per IP
+PROXY_RATE_LIMIT=5
+
+# Maximum burst size
+PROXY_RATE_BURST=10
+```
+
+The rate limiter:
+- Tracks IPs separately with automatic cleanup after 3 minutes of inactivity
+- Uses token bucket algorithm from `golang.org/x/time/rate`
+- Returns `429 Too Many Requests` when exceeded
+
+#### Bot Protection
+
+```bash
+# Enable bot blocking
+PROXY_BLOCK_BOTS=true
+
+# Comma-separated User-Agent patterns to block (case-insensitive)
+PROXY_BOTS=python,Googlebot,Bingbot,Slurp,DuckDuckBot,yandex,YandexBot,Sogou,baiduspider
+```
+
+<Note>
+Bot blocking happens before WAF inspection, reducing processing overhead for bot traffic.
+</Note>
+
+#### GeoIP Filtering
+
+```bash
+# Enable GeoIP-based blocking
+GEO_BLOCK_ENABLED=true
+
+# ISO country codes to allow (empty = allow all)
+GEO_ALLOW_COUNTRIES=US,CA,GB,DE,FR
+
+# ISO country codes to block (checked first)
+GEO_BLOCK_COUNTRIES=CN,RU,KP
+```
+
+**GeoIP Database Setup**:
+
+1. Download MaxMind GeoLite2 database
+2. Place at `/app/GeoLite2-Country.mmdb` in container
+3. Or mount via volume: `-v /path/to/GeoLite2-Country.mmdb:/app/GeoLite2-Country.mmdb:ro`
+
+<Info>
+GeoIP lookups are performed from `main.go:373` using the `geoip2-golang` library. Download the free database from [MaxMind](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data).
+</Info>
+
+### Backend Configuration
+
+The `BACKENDS` variable supports two formats:
+
+#### Simple Format (Legacy)
+
+```json
+{
+  "web.example.com": ["web:80"],
+  "api.example.com": ["api:8000"],
+  "default": ["fallback:80"]
+}
+```
+
+#### Advanced Format (Recommended)
+
+With path-based routing:
+
+```json
+{
+  "example.com": {
+    "default": ["web:80"],
+    "paths": {
+      "/api": ["api-server:8000"],
+      "/static": ["cdn:80"],
+      "/admin": ["admin-panel:3000"]
+    }
+  }
+}
+```
+
+**Path Matching Logic** (`main.go:317-341`):
+1. Longest prefix match wins (`/api/v2` matches `/api` not `/`)
+2. Falls back to `default` if no path matches
+3. Multiple backends in array enables round-robin load balancing
+
+<CodeGroup>
+```json Load Balancing
+{
+  "app.example.com": {
+    "default": ["web1:80", "web2:80", "web3:80"]
+  }
+}
+```
+
+```json Multi-Host with Paths
+{
+  "web.example.com": {
+    "default": ["web:80"],
+    "paths": {
+      "/api": ["api1:8000", "api2:8000"]
+    }
+  },
+  "admin.example.com": {
+    "default": ["admin:3000"]
+  }
+}
+```
+</CodeGroup>
+
+### Rule Configuration
+
+#### PL1 - Web Sites Profile
+
+Default path: `profiles/pl1-crs-setup.conf`
+
+```bash
+CORAZA_RULES_PATH_SITES="
+  profiles/coraza.conf:
+  profiles/pl1-crs-setup.conf:
+  coreruleset/rules/*.conf
+"
+```
+
+**Configuration highlights** (`profiles/pl1-crs-setup.conf`):
+
+```apache
+# Paranoia Level 1 - Balanced security
+SecAction "id:900000,phase:1,pass,nolog,
+  setvar:tx.blocking_paranoia_level=1,
+  setvar:tx.detection_paranoia_level=1,
+  setvar:tx.inbound_anomaly_score_threshold=5,
+  setvar:tx.outbound_anomaly_score_threshold=4"
+
+# Allowed methods for web sites
+SecAction "id:900200,phase:1,pass,nolog,
+  setvar:tx.allowed_methods=GET HEAD POST OPTIONS"
+
+# Content types for HTML sites
+SecAction "id:900220,phase:1,pass,nolog,
+  setvar:tx.allowed_request_content_type=
+  |application/x-www-form-urlencoded|
+  |multipart/form-data|
+  |text/html|
+  |application/json|
+  |text/css|
+  |image/|"
+
+# Skip inspection for static files (performance optimization)
+SecRule REQUEST_URI "@rx \.(ico|png|jpg|jpeg|gif|svg|css|js|woff2?)$" \
+  "id:100001,phase:1,pass,nolog,ctl:ruleRemoveById=920100-920499"
+```
+
+#### PL2 - APIs Profile
+
+Default path: `profiles/pl2-crs-setup.conf`
+
+```bash
+CORAZA_RULES_PATH_APIS="
+  profiles/coraza.conf:
+  profiles/pl2-crs-setup.conf:
+  coreruleset/rules/REQUEST-901-INITIALIZATION.conf:
+  coreruleset/rules/REQUEST-920-PROTOCOL-ENFORCEMENT.conf:
+  coreruleset/rules/REQUEST-930-APPLICATION-ATTACK-LFI.conf:
+  coreruleset/rules/REQUEST-934-APPLICATION-ATTACK-GENERIC.conf:
+  coreruleset/rules/REQUEST-941-APPLICATION-ATTACK-XSS.conf:
+  coreruleset/rules/REQUEST-942-APPLICATION-ATTACK-SQLI.conf
+"
+```
+
+**Why fewer rules for APIs?**
+- APIs typically don't serve HTML/CSS/JS
+- Focused on data injection attacks (SQLi, XSS in JSON)
+- Reduces false positives from API-specific patterns
+- Better performance with fewer rule evaluations
+
+#### Base Coraza Configuration
+
+From `profiles/coraza.conf`:
+
+```apache
+SecRuleEngine On
+
+SecRequestBodyAccess On
+SecRequestBodyLimit 13107200         # 12.5MB max request
+SecRequestBodyInMemoryLimit 131072   # 128KB in-memory buffer
+SecRequestBodyLimitAction Reject
+
+SecResponseBodyAccess Off            # Prevent RDoS
+
+SecDataDir /tmp/
+
+SecAuditEngine RelevantOnly          # Only log blocked/flagged requests
+SecAuditLogFormat JSON
+SecAuditLogParts ABIJDEFHZ
+SecAuditLog /tmp/log/coraza/audit.log
+
+SecDebugLogLevel 0                   # Set to 3+ for debugging
+```
+
+<Tip>
+`SecResponseBodyAccess Off` is critical for production. Response body inspection can cause Reverse Denial of Service if attackers send requests for large files.
+</Tip>
+
+### Docker Compose Setup
+
+Complete production-ready stack:
+
+```yaml docker-compose.yml
+version: '3.8'
+
+services:
+  coraza-proxy:
+    build: .
+    image: wafsec:local
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+      - BACKENDS={"web.example.com":["web:80"], "api.example.com":["api:8000"]}
+      - PROXY_WEB_HOSTS=web.example.com
+      - PROXY_APIS_HOSTS=api.example.com
+      - PROXY_RATE_LIMIT=10
+      - PROXY_RATE_BURST=20
+      - PROXY_BLOCK_BOTS=true
+      - GEO_BLOCK_ENABLED=false
+    volumes:
+      - ./profiles:/app/profiles:ro
+      - waf-logs:/tmp/log/coraza
+    restart: unless-stopped
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      - web
+      - api
+
+  web:
+    image: nginx:alpine
+    networks:
+      - backend
+
+  api:
+    image: your-api:latest
+    networks:
+      - backend
+
+volumes:
+  waf-logs:
+
+networks:
+  frontend:
+  backend:
+    internal: true
+```
+
+## IP Address Detection
+
+Coraza Proxy extracts the real client IP from multiple sources (`main.go:249-262`):
+
+```go
+func realClientIP(r *http.Request) string {
+    // Cloudflare proxy
+    if cf := r.Header.Get("CF-Connecting-IP"); cf != "" {
+        return cf
+    }
+    // Standard proxy header (first IP in chain)
+    if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+        parts := strings.Split(xff, ",")
+        return strings.TrimSpace(parts[0])
+    }
+    // Direct connection
+    host, _ := splitHostPort(r.RemoteAddr)
+    return host
+}
+```
+
+**Priority**:
+1. `CF-Connecting-IP` (Cloudflare)
+2. `X-Forwarded-For` (first IP only)
+3. `RemoteAddr` (direct connection)
+
+<Warning>
+Ensure your load balancer sets `X-Forwarded-For` correctly, or attackers can bypass rate limiting by spoofing IPs.
+</Warning>
+
+## Logging & Monitoring
+
+### Audit Logs
+
+JSON format logs to `/tmp/log/coraza/audit.log`:
+
+```json
+{
+  "transaction": {
+    "timestamp": "2026-03-04T12:34:56Z",
+    "client_ip": "203.0.113.42",
+    "request": {
+      "method": "GET",
+      "uri": "/?id=1' OR '1'='1",
+      "headers": {...}
+    },
+    "response": {
+      "status": 403
+    },
+    "messages": [
+      {
+        "rule_id": "942100",
+        "message": "SQL Injection Attack Detected"
+      }
+    ]
+  }
+}
+```
+
+### Debug Logs
+
+Enable with `SecDebugLogLevel 3` in `coraza.conf`:
+
+```apache
+SecDebugLogLevel 3
+SecDebugLog /tmp/log/coraza/debug.log
+```
+
+Levels:
+- `0` - None (production default)
+- `1` - Errors only
+- `3` - Warnings + errors
+- `9` - Full verbose (every rule evaluation)
+
+<Warning>
+Level 9 generates massive logs. Only use temporarily for troubleshooting specific issues.
+</Warning>
+
+### Log Rotation
+
+For production, use logrotate:
+
+```bash /etc/logrotate.d/coraza
+/tmp/log/coraza/*.log {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    notifempty
+    create 0644 coraza coraza
+    postrotate
+        docker exec coraza-proxy kill -USR1 1
+    endscript
+}
+```
+
+## Performance Tuning
+
+### Request Body Limits
+
+Adjust in `coraza.conf`:
+
+```apache
+SecRequestBodyLimit 13107200          # 12.5MB (default)
+SecRequestBodyInMemoryLimit 131072    # 128KB (default)
+```
+
+**Guidelines**:
+- File upload endpoints: Increase `SecRequestBodyLimit` to 50MB+
+- API endpoints: Keep at 1-5MB
+- In-memory limit: Max 1MB to prevent memory exhaustion
+
+### Rate Limiting
+
+Balance user experience with protection:
+
+```bash
+# Strict (API/backend)
+PROXY_RATE_LIMIT=5
+PROXY_RATE_BURST=10
+
+# Moderate (web apps)
+PROXY_RATE_LIMIT=10
+PROXY_RATE_BURST=20
+
+# Lenient (public content)
+PROXY_RATE_LIMIT=20
+PROXY_RATE_BURST=50
+```
+
+### Paranoia Levels
+
+Adjust in your CRS setup files:
+
+```apache
+# Level 1 - Production balanced (recommended)
+setvar:tx.blocking_paranoia_level=1
+
+# Level 2 - Increased security, some false positives
+setvar:tx.blocking_paranoia_level=2
+
+# Level 3-4 - Maximum security, high false positive rate
+setvar:tx.blocking_paranoia_level=3
+```
+
+<Tip>
+Start at PL1 and monitor for attacks. Only increase if you're seeing successful exploits. Each level approximately doubles rule coverage and false positive rate.
+</Tip>
+
+## Troubleshooting
+
+### Check WAF Status
+
+```bash
+# View startup logs
+docker logs coraza-proxy | grep -E "(WAF started|Listening)"
+
+# Expected output:
+GeoIP database loaded
+Coraza WAF started
+Listening on :8081
+```
+
+### Test Rule Loading
+
+Verify rules are loaded:
+
+```bash
+# Send a known-bad request
+curl -v "http://localhost:8081/?id=1'%20OR%201=1" \
+  -H "Host: waf.test.local"
+
+# Should return 403 with "Request blocked by WAF"
+```
+
+### Backend Connection Issues
+
+```bash
+# Test backend connectivity from container
+docker exec coraza-proxy wget -O- http://web:80
+
+# Check DNS resolution
+docker exec coraza-proxy nslookup web
+```
+
+### Common Error Messages
+
+<Accordion title="Bad Gateway: backend not configured">
+  **Cause**: No matching backend in `BACKENDS` for the requested host
+  
+  **Solution**: Add host to `BACKENDS` JSON or ensure `default` backend is defined
+  
+  ```json
+  {"default": ["fallback:80"]}
+  ```
+</Accordion>
+
+<Accordion title="WAF not configured for this host">
+  **Cause**: Host not in `PROXY_WEB_HOSTS` or `PROXY_APIS_HOSTS`
+  
+  **Solution**: Add to appropriate environment variable:
+  ```bash
+  PROXY_WEB_HOSTS=waf.test.local,example.com
+  ```
+</Accordion>
+
+<Accordion title="Error creating WAF sites/APIs">
+  **Cause**: Rule files not found or syntax errors
+  
+  **Solution**: 
+  - Verify rule paths exist: `ls /app/coreruleset/rules/`
+  - Check for syntax errors in custom rules
+  - Ensure OWASP CRS was cloned during build
+</Accordion>
+
+<Accordion title="GeoIP DB error">
+  **Cause**: GeoLite2 database missing but `GEO_BLOCK_ENABLED=true`
+  
+  **Solution**: 
+  - Download database and mount it
+  - Or disable: `GEO_BLOCK_ENABLED=false`
+</Accordion>
+
+## Security Considerations
+
+<Warning>
+**Do not expose Coraza Proxy directly to the internet without:**
+- TLS termination (use nginx/Caddy/Cloudflare in front)
+- Proper firewall rules
+- Regular rule updates from OWASP CRS
+- Log monitoring and alerting
+</Warning>
+
+### Production Checklist
+
+- [ ] TLS termination configured upstream
+- [ ] Rate limiting tuned for expected traffic
+- [ ] GeoIP filtering enabled (if applicable)
+- [ ] Bot protection configured
+- [ ] Audit logs collected and monitored
+- [ ] Log rotation configured
+- [ ] Backend health checks implemented
+- [ ] Paranoia level tested with legitimate traffic
+- [ ] Custom exclusion rules documented
+- [ ] Incident response plan for false positives
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="WAF Rules" icon="code" href="/configuration/waf-rules">
+    Configure WAF rules and protection levels
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Set up observability and alerting
+  </Card>
+</CardGroup>

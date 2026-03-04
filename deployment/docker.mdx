@@ -1,0 +1,166 @@
+---
+title: Docker Deployment
+description: Deploy Coraza Proxy using Docker with multi-stage builds for optimized production images
+---
+
+## Overview
+
+Coraza Proxy uses a multi-stage Docker build to create a lightweight, production-ready container. The build process compiles the Go application and bundles the OWASP Core Rule Set in a secure Alpine-based image.
+
+## Dockerfile Breakdown
+
+The Dockerfile uses a two-stage build process to minimize the final image size:
+
+### Build Stage
+
+```dockerfile
+FROM golang:1.24-alpine AS builder
+
+RUN apk add --no-cache git
+WORKDIR /src
+
+COPY . .
+
+RUN go mod tidy
+# Download Coraza and OWASP CRS
+RUN git clone --depth 1 https://github.com/coreruleset/coreruleset /src/coreruleset
+RUN go build -o /coraza-proxy main.go
+```
+
+The build stage:
+- Uses Go 1.24 on Alpine Linux
+- Installs git to clone the OWASP Core Rule Set
+- Compiles the application into a static binary
+- Downloads the latest CRS rules
+
+### Production Stage
+
+```dockerfile
+FROM alpine:latest
+RUN apk add --no-cache ca-certificates
+
+RUN addgroup -S coraza && adduser -S coraza -G coraza
+
+WORKDIR /app
+
+COPY --from=builder /coraza-proxy /app/coraza-proxy
+COPY --from=builder /src/coreruleset /app/coreruleset
+COPY --from=builder /src/profiles /app/profiles
+
+RUN mkdir -p /tmp/log/coraza && \
+    touch /tmp/log/coraza/audit.log && \
+    chown -R coraza:coraza /tmp/log/coraza
+
+USER coraza
+
+ENTRYPOINT ["/app/coraza-proxy"]
+```
+
+The production stage:
+- Uses minimal Alpine Linux base image
+- Creates a non-root user `coraza` for security
+- Copies the compiled binary and rule sets
+- Sets up logging directories with proper permissions
+- Runs as non-root user
+
+## Building the Image
+
+Build the Docker image from the project root:
+
+```bash
+docker build -t wafsec:local .
+```
+
+<Tip>
+The image is tagged as `wafsec:local` to match the compose file configurations.
+</Tip>
+
+## Running the Container
+
+### Basic Run
+
+Run the container with minimal configuration:
+
+```bash
+docker run -d \
+  --name coraza-proxy \
+  -p 8081:8081 \
+  -e BACKENDS='{"default":["localhost:5000"]}' \
+  wafsec:local
+```
+
+### With Volume Mounts
+
+Mount log files for persistence:
+
+```bash
+docker run -d \
+  --name coraza-proxy \
+  -p 8081:8081 \
+  -v ./logs:/tmp/log/coraza \
+  -e BACKENDS='{"waf.test.local":["web:80"]}' \
+  wafsec:local
+```
+
+### With Custom Rules
+
+Mount custom rule configurations:
+
+```bash
+docker run -d \
+  --name coraza-proxy \
+  -p 8081:8081 \
+  -v ./logs:/tmp/log/coraza \
+  -v ./custom-profiles:/app/profiles \
+  -e CORAZA_RULES_PATH_SITES="/app/profiles/coraza.conf:/app/coreruleset/rules/*.conf" \
+  wafsec:local
+```
+
+## Security Considerations
+
+<Warning>
+The container runs as a non-root user (`coraza`) for security. Ensure any mounted volumes have appropriate permissions.
+</Warning>
+
+### File Permissions
+
+If mounting custom directories, set proper ownership:
+
+```bash
+# Create log directory with correct permissions
+mkdir -p ./logs
+chown -R 1000:1000 ./logs  # Match the coraza user UID/GID
+```
+
+## Image Size Optimization
+
+The multi-stage build significantly reduces image size:
+
+- **Build stage**: ~800MB (includes Go compiler and build tools)
+- **Final image**: ~50MB (only Alpine + binary + rules)
+
+## Health Checks
+
+Add a health check when running the container:
+
+```bash
+docker run -d \
+  --name coraza-proxy \
+  -p 8081:8081 \
+  --health-cmd="wget --no-verbose --tries=1 --spider http://localhost:8081 || exit 1" \
+  --health-interval=30s \
+  --health-timeout=10s \
+  --health-retries=3 \
+  wafsec:local
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Docker Compose" icon="layer-group" href="/deployment/docker-compose">
+    Multi-container setup with Docker Compose
+  </Card>
+  <Card title="Configuration" icon="gear" href="/deployment/configuration">
+    Environment variables and advanced configuration
+  </Card>
+</CardGroup>

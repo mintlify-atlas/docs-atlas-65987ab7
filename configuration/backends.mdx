@@ -1,0 +1,206 @@
+---
+title: Backend Configuration
+description: Configure backend servers with multi-host support, path-based routing, and load balancing
+---
+
+## Overview
+
+Coraza Proxy supports flexible backend configuration through the `BACKENDS` environment variable. You can configure multiple backend servers with host-based routing, path-based routing, and automatic round-robin load balancing.
+
+## Backend Configuration Format
+
+The `BACKENDS` environment variable accepts two formats:
+
+### New Format (Recommended)
+
+The new format supports both host-based and path-based routing:
+
+```json
+{
+  "example.com": {
+    "default": ["web:80", "web2:80"],
+    "paths": {
+      "/static": ["static:80"],
+      "/api": ["api:8080"]
+    }
+  },
+  "api.example.com": {
+    "default": ["api:8082"]
+  },
+  "default": {
+    "default": ["localhost:5000"]
+  }
+}
+```
+
+### Legacy Format (Compatibility)
+
+The legacy format supports simple host-based routing:
+
+```json
+{
+  "example.com": ["web:80"],
+  "api.example.com": ["api:8082"],
+  "default": ["localhost:5000"]
+}
+```
+
+## Environment Variables
+
+<ParamField path="BACKENDS" type="string" required>
+  JSON configuration for backend servers. If not set, defaults to `{"default": ["localhost:5000"]}`.
+</ParamField>
+
+## How It Works
+
+The backend selection follows this logic (from `main.go:317-341`):
+
+```go
+func pickBackendForRequest(hostCfg *HostBackend, path string) *Backend {
+    if hostCfg == nil {
+        return nil
+    }
+
+    // Match de prefijo más largo (importante si tienes /static y /static/img)
+    var (
+        bestLen int
+        best    *Backend
+    )
+    for pfx, be := range hostCfg.Paths {
+        if strings.HasPrefix(path, pfx) && len(pfx) > bestLen {
+            bestLen = len(pfx)
+            best = be
+        }
+    }
+    if best != nil && len(best.Addrs) > 0 {
+        return best
+    }
+
+    if hostCfg.Default != nil && len(hostCfg.Default.Addrs) > 0 {
+        return hostCfg.Default
+    }
+    return nil
+}
+```
+
+### Selection Process
+
+1. **Path matching**: The proxy first checks if the request path matches any path prefix defined in the `paths` configuration
+2. **Longest prefix wins**: If multiple path prefixes match, the longest one is selected
+3. **Default fallback**: If no path matches, the `default` backend is used
+4. **Host fallback**: If no configuration exists for the requested host, the `default` host configuration is used
+
+## Load Balancing
+
+When multiple backend addresses are configured, the proxy uses round-robin load balancing (from `main.go:552-553`):
+
+```go
+idx := int((atomic.AddUint64(&be.Counter, 1) - 1) % uint64(len(be.Addrs)))
+target := be.Addrs[idx]
+```
+
+Each backend maintains an atomic counter that cycles through available addresses.
+
+## Data Structures
+
+The backend configuration is parsed into these structures (from `main.go:24-45`):
+
+```go
+type Backend struct {
+    Addrs   []string
+    Counter uint64
+}
+
+type HostBackend struct {
+    Default *Backend
+    Paths   map[string]*Backend // clave = prefijo, ej "/static"
+}
+```
+
+## Configuration Examples
+
+### Single Backend
+
+```bash
+BACKENDS='{"default": {"default": ["app:3000"]}}'
+```
+
+### Multiple Hosts
+
+```bash
+BACKENDS='{
+  "web.example.com": {"default": ["web:80"]},
+  "api.example.com": {"default": ["api:8080"]},
+  "default": {"default": ["localhost:5000"]}
+}'
+```
+
+### Path-Based Routing
+
+```bash
+BACKENDS='{
+  "example.com": {
+    "default": ["web:80"],
+    "paths": {
+      "/static": ["cdn:80"],
+      "/api": ["api:8080"],
+      "/admin": ["admin:3000"]
+    }
+  }
+}'
+```
+
+### Load Balancing with Multiple Servers
+
+```bash
+BACKENDS='{
+  "example.com": {
+    "default": ["web1:80", "web2:80", "web3:80"],
+    "paths": {
+      "/api": ["api1:8080", "api2:8080"]
+    }
+  }
+}'
+```
+
+## Docker Compose Example
+
+```yaml
+version: '3.8'
+
+services:
+  proxy:
+    image: coraza-proxy
+    environment:
+      BACKENDS: >-
+        {
+          "example.com": {
+            "default": ["web:80"],
+            "paths": {"/api": ["api:8080"]}
+          }
+        }
+    ports:
+      - "8081:8081"
+
+  web:
+    image: nginx:alpine
+    
+  api:
+    image: node:alpine
+    command: node server.js
+```
+
+## Error Handling
+
+If no backend can be selected for a request, the proxy returns:
+
+```
+502 Bad Gateway: backend not configured
+```
+
+## Best Practices
+
+1. **Always define a default**: Include a `"default"` host configuration to handle unmatched hosts
+2. **Use path prefixes wisely**: More specific paths should be listed alongside less specific ones (e.g., `/static/images` and `/static`)
+3. **Load balance critical services**: Configure multiple backend addresses for high-availability services
+4. **Use Docker DNS**: In Docker environments, use service names instead of IP addresses for automatic service discovery

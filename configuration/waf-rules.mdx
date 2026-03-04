@@ -1,0 +1,304 @@
+---
+title: WAF Rules Configuration
+description: Configure Coraza WAF rules with OWASP Core Rule Set, paranoia levels, and custom rule files
+---
+
+## Overview
+
+Coraza Proxy uses the Coraza WAF engine with the OWASP Core Rule Set (CRS) to protect your applications. You can configure different rule sets for different types of applications (websites vs APIs) and customize paranoia levels for security vs false positive balance.
+
+## Environment Variables
+
+<ParamField path="CORAZA_RULES_PATH_SITES" type="string">
+  Colon-separated list of configuration files for website/HTML protection. Uses Paranoia Level 1 by default.
+  
+  **Default**: `/app/coraza.conf:/app/coreruleset/pl1-crs-setup.conf:/app/coreruleset/rules/*.conf`
+</ParamField>
+
+<ParamField path="CORAZA_RULES_PATH_APIS" type="string">
+  Colon-separated list of configuration files for API protection. Uses Paranoia Level 2 by default.
+  
+  **Default**: `/app/coraza.conf:/app/coreruleset/pl2-crs-setup.conf:/app/coreruleset/rules/REQUEST-901-INITIALIZATION.conf:/app/coreruleset/rules/*.conf`
+</ParamField>
+
+<ParamField path="PROXY_WEB_HOSTS" type="string">
+  Comma-separated list of hostnames that should use the website rule set (PL1).
+  
+  **Example**: `web.example.com,www.example.com`
+</ParamField>
+
+<ParamField path="PROXY_APIS_HOSTS" type="string">
+  Comma-separated list of hostnames that should use the API rule set (PL2).
+  
+  **Example**: `api.example.com,api-v2.example.com`
+</ParamField>
+
+## How It Works
+
+The WAF loading process (from `main.go:214-224`):
+
+```go
+// loadWAF loads a Web Application Firewall (WAF) configuration from a colon-separated list of file paths.
+func loadWAF(paths string) (coraza.WAF, error) {
+    cfg := coraza.NewWAFConfig()
+    for _, f := range strings.Split(paths, ":") {
+        f = strings.TrimSpace(f)
+        if f != "" {
+            cfg = cfg.WithDirectivesFromFile(f)
+        }
+    }
+    return coraza.NewWAF(cfg)
+}
+```
+
+Two separate WAF instances are created at startup (from `main.go:380-410`):
+
+```go
+// ------------ RULES FOR SITES (PL1) ------------
+rulesSites := os.Getenv("CORAZA_RULES_PATH_SITES")
+if rulesSites == "" {
+    rulesSites = "/app/coraza.conf:/app/coreruleset/pl1-crs-setup.conf:/app/coreruleset/rules/*.conf"
+}
+
+// ------------ RULES FOR SITES (PL2) ------------
+rulesAPIs := os.Getenv("CORAZA_RULES_PATH_APIS")
+if rulesAPIs == "" {
+    rulesAPIs = "/app/coraza.conf:/app/coreruleset/pl2-crs-setup.conf:/app/coreruleset/rules/REQUEST-901-INITIALIZATION.conf:/app/coreruleset/rules/*.conf"
+}
+
+// Load WAFs
+wafSites, err := loadWAF(rulesSites)
+if err != nil {
+    log.Fatalf("Error creating WAF sites: %v", err)
+}
+
+wafApis, err := loadWAF(rulesAPIs)
+if err != nil {
+    log.Fatalf("Error creating WAF APIs: %v", err)
+}
+
+apisHosts := parseHosts("PROXY_APIS_HOSTS")
+webHosts := parseHosts("PROXY_WEB_HOSTS")
+```
+
+The appropriate WAF is selected per request based on the hostname (from `main.go:460-476`):
+
+```go
+hostOnly := strings.Split(r.Host, ":")[0]
+var waf coraza.WAF
+
+if _, ok := apisHosts[hostOnly]; ok {
+    waf = wafApis
+}
+
+if _, ok := webHosts[hostOnly]; ok {
+    waf = wafSites
+}
+
+if waf == nil {
+    log.Println("WAF not configured for host:", hostOnly)
+    http.Error(w, "WAF not configured for this host", http.StatusInternalServerError)
+    return
+}
+```
+
+## Paranoia Levels
+
+### PL1 - Websites (Paranoia Level 1)
+
+Optimized for HTML websites with lower false positives (from `profiles/pl1-crs-setup.conf`):
+
+```apache
+# Paranoia level 1
+SecAction \
+ "id:900000,phase:1,pass,nolog,\
+  setvar:tx.blocking_paranoia_level=1,\
+  setvar:tx.detection_paranoia_level=1,\
+  setvar:tx.inbound_anomaly_score_threshold=5,\
+  setvar:tx.outbound_anomaly_score_threshold=4"
+
+# Typical HTTP methods for a website
+SecAction \
+ "id:900200,phase:1,pass,nolog,\
+  setvar:tx.allowed_methods=GET HEAD POST OPTIONS"
+
+# Allow text/html and static content types
+SecAction \
+ "id:900220,phase:1,pass,nolog,\
+  setvar:tx.allowed_request_content_type=\
+  |application/x-www-form-urlencoded|\
+  |multipart/form-data|\
+  |text/plain|\
+  |text/html|\
+  |application/json|\
+  |application/javascript|\
+  |text/css|\
+  |image/|"
+```
+
+**Features**:
+- Anomaly score threshold: 5 (inbound), 4 (outbound)
+- Allowed methods: GET, HEAD, POST, OPTIONS
+- Supports HTML forms, multipart uploads, JSON, CSS, JavaScript, and images
+- Static file exclusions to avoid false positives
+
+### PL2 - APIs (Paranoia Level 2)
+
+Stricter protection for JSON APIs (from `profiles/pl2-crs-setup.conf`):
+
+```apache
+SecAction \
+ "id:900000,phase:1,pass,nolog,\
+  setvar:tx.blocking_paranoia_level=2,\
+  setvar:tx.detection_paranoia_level=2,\
+  setvar:tx.inbound_anomaly_score_threshold=7,\
+  setvar:tx.outbound_anomaly_score_threshold=5"
+
+SecAction \
+ "id:900200,phase:1,pass,nolog,\
+  setvar:tx.allowed_methods=GET POST PUT PATCH DELETE OPTIONS"
+
+SecAction \
+ "id:900220,phase:1,pass,nolog,\
+  setvar:tx.allowed_request_content_type=|application/json| |application/x-www-form-urlencoded|"
+```
+
+**Features**:
+- Anomaly score threshold: 7 (inbound), 5 (outbound)
+- Allowed methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+- Restricted to JSON and form data
+- More aggressive detection rules
+
+## Base Configuration
+
+The base Coraza configuration (from `profiles/coraza.conf`):
+
+```apache
+SecRuleEngine On
+
+SecRequestBodyAccess On
+SecRequestBodyLimit 13107200
+SecRequestBodyInMemoryLimit 131072
+SecRequestBodyLimitAction Reject
+
+SecResponseBodyAccess Off
+
+SecDataDir /tmp/
+
+SecAuditEngine RelevantOnly
+SecAuditLogFormat JSON
+SecAuditLogParts ABIJDEFHZ
+SecAuditLog /tmp/log/coraza/audit.log
+
+SecDebugLogLevel 0
+```
+
+## Request Processing
+
+The WAF processes requests in multiple phases (from `main.go:478-538`):
+
+```go
+tx := waf.NewTransaction()
+defer tx.ProcessLogging()
+defer func(tx ctypes.Transaction) {
+    err := tx.Close()
+    if err != nil {
+        log.Println("Error closing WAF transaction:", err)
+    }
+}(tx)
+
+// Connection
+_, clientPort := splitHostPort(r.RemoteAddr)
+serverIP, serverPort := splitHostPort(r.Host)
+tx.ProcessConnection(clientIP, clientPort, serverIP, serverPort)
+
+// Headers
+for k, v := range r.Header {
+    for _, vv := range v {
+        tx.AddRequestHeader(k, vv)
+    }
+}
+tx.ProcessURI(r.URL.String(), r.Method, r.Proto)
+
+if it := tx.ProcessRequestHeaders(); it != nil {
+    if block, status := shouldBlock(it); block {
+        w.WriteHeader(status)
+        _, _ = w.Write([]byte("Request blocked by WAF (headers)"))
+        log.Println("Request blocked by WAF (headers)")
+        return
+    }
+}
+
+// Body processing...
+```
+
+## Configuration Examples
+
+### Basic Setup
+
+```bash
+# Website protection
+PROXY_WEB_HOSTS=www.example.com,example.com
+
+# API protection
+PROXY_APIS_HOSTS=api.example.com
+```
+
+### Custom Rule Paths
+
+```bash
+# Custom website rules
+CORAZA_RULES_PATH_SITES="/app/coraza.conf:/app/custom-setup.conf:/app/coreruleset/rules/*.conf"
+
+# Custom API rules with specific rule files
+CORAZA_RULES_PATH_APIS="/app/coraza.conf:/app/api-setup.conf:/app/coreruleset/rules/REQUEST-901-INITIALIZATION.conf:/app/coreruleset/rules/REQUEST-942-APPLICATION-ATTACK-SQLI.conf"
+```
+
+### Using .env.example
+
+From the project's `.env.example`:
+
+```bash
+CORAZA_RULES_PATH_APIS="coraza.conf:profiles/pl2-crs-setup.conf:coreruleset/rules/REQUEST-901-INITIALIZATION.conf:coreruleset/rules/REQUEST-920-PROTOCOL-ENFORCEMENT.conf:coreruleset/rules/REQUEST-930-APPLICATION-ATTACK-LFI.conf:coreruleset/rules/REQUEST-934-APPLICATION-ATTACK-GENERIC.conf:coreruleset/rules/REQUEST-941-APPLICATION-ATTACK-XSS.conf:coreruleset/rules/REQUEST-942-APPLICATION-ATTACK-SQLI.conf"
+
+CORAZA_RULES_PATH_SITES="coraza.conf:profiles/pl1-crs-setup.conf:coreruleset/rules/*.conf"
+
+PROXY_APIS_HOSTS=api.test.local
+PROXY_WEB_HOSTS=waf.test.local
+```
+
+## Custom Rules
+
+You can add custom rules by creating additional configuration files and including them in the path:
+
+```apache
+# custom-rules.conf
+SecRule REQUEST_URI "@streq /admin" \
+    "id:100000,\
+    phase:1,\
+    block,\
+    status:403,\
+    msg:'Admin access denied'"
+```
+
+Then include it:
+
+```bash
+CORAZA_RULES_PATH_SITES="/app/coraza.conf:/app/custom-rules.conf:/app/coreruleset/pl1-crs-setup.conf:/app/coreruleset/rules/*.conf"
+```
+
+## Audit Logging
+
+Audit logs are written in JSON format to `/tmp/log/coraza/audit.log` and include:
+- Request/response headers
+- Request/response bodies (when applicable)
+- Rule matches and scores
+- Transaction details
+
+## Best Practices
+
+1. **Start with PL1**: Begin with lower paranoia levels and increase as needed
+2. **Separate hosts**: Use different rule sets for websites (PL1) and APIs (PL2)
+3. **Monitor audit logs**: Review logs regularly to tune rules and reduce false positives
+4. **Custom exclusions**: Add custom rules to exclude legitimate traffic patterns
+5. **Test in detection mode**: Set `SecRuleEngine DetectionOnly` to test rules without blocking

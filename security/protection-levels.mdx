@@ -1,0 +1,200 @@
+---
+title: Protection Levels
+description: Understanding PL1 and PL2 protection profiles for websites and APIs
+---
+
+## Overview
+
+Coraza Proxy provides two distinct protection profiles based on the OWASP Core Rule Set (CRS) to optimize security for different application types:
+
+- **PL1 (Protection Level 1)**: Designed for HTML websites and static content
+- **PL2 (Protection Level 2)**: Designed for JSON APIs with stricter controls
+
+## PL1 - Website Protection
+
+PL1 is optimized for traditional web applications serving HTML, CSS, JavaScript, images, and other static assets.
+
+### Configuration
+
+PL1 uses the `pl1-crs-setup.conf` profile with these settings:
+
+```conf
+# Paranoia level 1 - balanced security
+setvar:tx.blocking_paranoia_level=1
+setvar:tx.detection_paranoia_level=1
+setvar:tx.inbound_anomaly_score_threshold=5
+setvar:tx.outbound_anomaly_score_threshold=4
+```
+
+### Key Features
+
+**Allowed HTTP Methods**
+- `GET`, `HEAD`, `POST`, `OPTIONS`
+
+**Allowed Content Types**
+- `application/x-www-form-urlencoded`
+- `multipart/form-data` (file uploads)
+- `text/plain`, `text/html`
+- `application/json`, `application/javascript`
+- `text/css`
+- `image/*` (all image types)
+
+**HTTP Versions**
+- `HTTP/1.1`, `HTTP/2`, `HTTP/2.0`, `HTTP/3`, `HTTP/3.0`
+- Optimized for Cloudflare and modern browsers
+
+**Special Optimizations**
+- Static file exemptions: `.ico`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.css`, `.js`, `.woff`, `.woff2`
+- Protocol enforcement disabled for static assets (rules 920100-920499)
+- Modern header support: `cf-*`, `cdn-loop`, `priority`, `sec-*`
+- Browser user-agent validation
+
+### Anomaly Score Thresholds
+
+- **Inbound**: 5 points
+- **Outbound**: 4 points
+
+Lower thresholds mean more sensitive detection while minimizing false positives for legitimate web traffic.
+
+<Note>
+PL1 disables response inspection (`tx.crs_skip_response_analysis=1`) to prevent Resource-based Denial of Service (RFDoS) attacks when serving large files.
+</Note>
+
+## PL2 - API Protection
+
+PL2 provides stricter security controls specifically designed for REST APIs that communicate primarily with JSON.
+
+### Configuration
+
+PL2 uses the `pl2-crs-setup.conf` profile with these settings:
+
+```conf
+# Paranoia level 2 - stricter security
+setvar:tx.blocking_paranoia_level=2
+setvar:tx.detection_paranoia_level=2
+setvar:tx.inbound_anomaly_score_threshold=7
+setvar:tx.outbound_anomaly_score_threshold=5
+```
+
+### Key Features
+
+**Allowed HTTP Methods**
+- `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`
+- Full RESTful method support
+
+**Allowed Content Types**
+- `application/json` (primary)
+- `application/x-www-form-urlencoded` (limited)
+
+<Warning>
+PL2 does NOT allow `multipart/form-data`, HTML content, or image uploads. This is intentional to prevent attacks through file upload vectors.
+</Warning>
+
+**HTTP Versions**
+- `HTTP/1.1`, `HTTP/2`
+- No HTTP/3 by default (can be customized)
+
+### Anomaly Score Thresholds
+
+- **Inbound**: 7 points
+- **Outbound**: 5 points
+
+Higher thresholds provide stricter detection with higher paranoia level rules activated.
+
+## Choosing the Right Protection Level
+
+### Use PL1 When:
+
+- Serving HTML web pages
+- Hosting static assets (images, CSS, JavaScript)
+- Supporting file uploads
+- Using traditional form submissions
+- Working with content management systems (WordPress, Drupal, etc.)
+- Serving mixed content types
+
+### Use PL2 When:
+
+- Building REST APIs
+- Accepting only JSON payloads
+- Using RESTful methods (PUT, PATCH, DELETE)
+- Requiring stricter security controls
+- No file upload requirements
+- Machine-to-machine communication
+
+## Implementation Example
+
+From `main.go:380-410`, the proxy loads both WAF configurations:
+
+```go
+// PL1 for websites
+rulesSites := "/app/coraza.conf:/app/coreruleset/pl1-crs-setup.conf:/app/coreruleset/rules/*.conf"
+wafSites, _ := loadWAF(rulesSites)
+
+// PL2 for APIs  
+rulesAPIs := "/app/coraza.conf:/app/coreruleset/pl2-crs-setup.conf:/app/coreruleset/rules/*.conf"
+wafApis, _ := loadWAF(rulesAPIs)
+```
+
+Host-based routing selects the appropriate WAF:
+
+```go
+// main.go:464-470
+if _, ok := apisHosts[hostOnly]; ok {
+    waf = wafApis
+}
+
+if _, ok := webHosts[hostOnly]; ok {
+    waf = wafSites
+}
+```
+
+Configure via environment variables:
+
+```bash
+# Define which hosts use which profile
+PROXY_WEB_HOSTS="waf.test.local,www.example.com"
+PROXY_APIS_HOSTS="api.test.local,api.example.com"
+```
+
+## Paranoia Levels Explained
+
+### Paranoia Level 1 (PL1)
+
+- **Security**: Balanced protection
+- **False Positives**: Low
+- **Performance**: Optimal
+- **Use Case**: Production websites with diverse traffic
+
+### Paranoia Level 2 (PL2)
+
+- **Security**: Enhanced protection
+- **False Positives**: Moderate
+- **Performance**: Good
+- **Use Case**: APIs with controlled clients
+
+<Note>
+The OWASP CRS supports paranoia levels up to 4. Higher levels (3-4) activate increasingly aggressive rules but may require significant tuning to reduce false positives.
+</Note>
+
+## UTF-8 Validation
+
+Both profiles enforce UTF-8 encoding validation:
+
+```conf
+setvar:tx.crs_validate_utf8_encoding=1
+```
+
+This prevents attacks using invalid UTF-8 sequences to bypass detection rules.
+
+## Best Practices
+
+1. **Start with PL1** for new deployments and monitor false positives
+2. **Use PL2 for APIs** where you control client implementations
+3. **Customize profiles** based on your specific application requirements
+4. **Monitor audit logs** at `/tmp/log/coraza/audit.log` to tune rules
+5. **Test thoroughly** before deploying to production (see [Testing Guide](/security/testing))
+6. **Review blocked requests** to identify legitimate traffic patterns
+
+<Warning>
+Never expose both profiles on the same hostname. Use separate domains or subdomains for web and API traffic to maintain clear security boundaries.
+</Warning>

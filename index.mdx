@@ -1,97 +1,281 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: Coraza Proxy
+mode: custom
 ---
 
-## Setting up
+<div className="relative overflow-hidden bg-gradient-to-br from-[#0f1117] via-[#1a1d27] to-[#0f1117] dark:from-[#0f1117] dark:via-[#1a1d27] dark:to-[#0f1117]">
+  <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjAiIGhlaWdodD0iNjAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGRlZnM+PHBhdHRlcm4gaWQ9ImdyaWQiIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCIgcGF0dGVyblVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHBhdGggZD0iTSAxMCAwIEwgMCAwIDAgMTAiIGZpbGw9Im5vbmUiIHN0cm9rZT0icmdiYSgyNTUsMjU1LDI1NSwwLjAzKSIgc3Ryb2tlLXdpZHRoPSIxIi8+PC9wYXR0ZXJuPjwvZGVmcz48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSJ1cmwoI2dyaWQpIi8+PC9zdmc+')] opacity-40"></div>
+  
+  <div className="relative max-w-7xl mx-auto px-6 sm:px-8 py-20 sm:py-24 lg:py-28">
+    <div className="grid lg:grid-cols-12 gap-12 items-center">
+      <div className="lg:col-span-7">
+        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-white mb-6 leading-tight">
+          Protect your applications with <span className="text-[#4595db]">Coraza WAF</span>
+        </h1>
+        <p className="text-lg sm:text-xl text-gray-300 dark:text-gray-300 mb-8 max-w-2xl">
+          A high-performance reverse proxy with built-in Web Application Firewall powered by Coraza and OWASP Core Rule Set. Defend against SQL injection, XSS, RCE, and more.
+        </p>
+        <div className="flex flex-wrap gap-4">
+          <a 
+            href="/quickstart" 
+            className="inline-flex items-center px-6 py-3 rounded-lg bg-[#4595db] text-white font-semibold hover:bg-[#3a7ec7] transition-colors"
+          >
+            Get Started
+            <svg className="ml-2 w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+            </svg>
+          </a>
+          <a 
+            href="/deployment/docker" 
+            className="inline-flex items-center px-6 py-3 rounded-lg border border-white/30 bg-white/10 text-white font-semibold hover:bg-white/20 transition-colors backdrop-blur-sm"
+          >
+            View Deployment Guide
+          </a>
+        </div>
+      </div>
+      
+      <div className="lg:col-span-5 hidden lg:block">
+        <div className="relative">
+          <div className="absolute -inset-4 bg-gradient-to-r from-[#4595db] to-[#5ebf9e] opacity-20 blur-2xl rounded-full"></div>
+          <div className="relative bg-[#1a1d27] dark:bg-[#1a1d27] rounded-2xl border border-[#27272a] dark:border-[#27272a] p-6 shadow-2xl">
+            <div className="flex items-center gap-2 mb-4">
+              <div className="w-3 h-3 rounded-full bg-red-500"></div>
+              <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+              <div className="w-3 h-3 rounded-full bg-green-500"></div>
+            </div>
+            <pre className="text-sm text-gray-300 dark:text-gray-300 overflow-x-auto"><code>{`# Start Coraza Proxy
+docker run -p 8081:8081 \\
+  -e BACKENDS='{"api.example.com":["api:8080"]}' \\
+  -e PROXY_APIS_HOSTS=api.example.com \\
+  -e PROXY_RATE_LIMIT=100 \\
+  coraza-proxy:latest
 
-Get your documentation site up and running in minutes.
+✓ WAF protection enabled
+✓ Rate limiting active
+✓ Request inspection running`}</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <div className="text-center mb-12">
+    <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Get started in minutes</h2>
+    <p className="text-lg text-gray-600 dark:text-gray-400">Deploy enterprise-grade web application security in three simple steps</p>
+  </div>
 
-## Make it yours
+  <Steps>
+    <Step title="Pull the Docker image">
+      Build the Coraza Proxy container from source or use a pre-built image:
+      
+      ```bash
+      git clone https://github.com/alexperezortuno/go-coraza.git
+      cd go-coraza
+      docker build -t coraza-proxy:latest .
+      ```
+      
+      The image includes Coraza WAF engine and OWASP Core Rule Set v4.
+    </Step>
+    
+    <Step title="Configure your backends">
+      Set up environment variables to define your backend services and protection rules:
+      
+      ```bash
+      export BACKENDS='{"api.example.com":["api-server:8080"],"web.example.com":["web-server:80"]}'
+      export PROXY_APIS_HOSTS=api.example.com
+      export PROXY_WEB_HOSTS=web.example.com
+      export PROXY_RATE_LIMIT=100
+      export PROXY_RATE_BURST=200
+      ```
+      
+      <Accordion title="View full configuration options">
+        - `BACKENDS`: JSON map of hostnames to backend server addresses
+        - `PROXY_APIS_HOSTS`: Comma-separated list of API hosts (uses PL2 protection profile)
+        - `PROXY_WEB_HOSTS`: Comma-separated list of web hosts (uses PL1 protection profile)
+        - `PROXY_RATE_LIMIT`: Requests per second per IP
+        - `PROXY_RATE_BURST`: Maximum burst size for rate limiting
+        - `GEO_BLOCK_ENABLED`: Enable GeoIP filtering (true/false)
+        - `PROXY_BLOCK_BOTS`: Block known bots (true/false)
+      </Accordion>
+    </Step>
+    
+    <Step title="Start the proxy">
+      Launch Coraza Proxy and start protecting your applications:
+      
+      ```bash
+      docker run -d -p 8081:8081 \\
+        -e BACKENDS='{"api.example.com":["api-server:8080"]}' \\
+        -e PROXY_APIS_HOSTS=api.example.com \\
+        -e PROXY_RATE_LIMIT=100 \\
+        coraza-proxy:latest
+      ```
+      
+      Your applications are now protected. Test with a malicious request:
+      
+      ```bash
+      curl "http://localhost:8081/" -H "Host: api.example.com" \\
+        --data-urlencode "q=1' OR '1'='1"
+      ```
+      
+      <Note>The request above contains SQL injection and will be blocked by Coraza WAF with a 403 Forbidden response.</Note>
+    </Step>
+  </Steps>
+</div>
 
-Design a docs site that looks great and empowers your users.
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <div className="text-center mb-12">
+    <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Key features</h2>
+    <p className="text-lg text-gray-600 dark:text-gray-400">Everything you need to secure your web applications and APIs</p>
+  </div>
 
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
-  </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
-  </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
-  </Card>
-</Columns>
+  <CardGroup cols={2}>
+    <Card title="WAF protection" icon="shield-halved" href="/security/protection-levels">
+      Powered by Coraza WAF and OWASP Core Rule Set with separate profiles for APIs (PL2) and websites (PL1)
+    </Card>
+    <Card title="Rate limiting" icon="gauge-high" href="/configuration/rate-limiting">
+      Per-IP rate limiting with configurable burst sizes and automatic cleanup of inactive visitors
+    </Card>
+    <Card title="GeoIP filtering" icon="earth-americas" href="/configuration/geoip-blocking">
+      Allow or block traffic based on country codes using MaxMind GeoIP2 database
+    </Card>
+    <Card title="Bot detection" icon="robot" href="/configuration/bot-detection">
+      Identify and block malicious bots while allowing legitimate crawlers
+    </Card>
+    <Card title="Multi-backend routing" icon="route" href="/configuration/backends">
+      Load balance across multiple backend servers with path-based routing support
+    </Card>
+    <Card title="Attack detection" icon="bug" href="/security/attack-detection">
+      Detect and block SQL injection, XSS, RCE, LFI, and OWASP Top 10 vulnerabilities
+    </Card>
+  </CardGroup>
+</div>
 
-## Create beautiful pages
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <div className="text-center mb-12">
+    <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Explore the documentation</h2>
+    <p className="text-lg text-gray-600 dark:text-gray-400">Learn how to deploy, configure, and operate Coraza Proxy</p>
+  </div>
 
-Everything you need to create world-class documentation.
+  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <a 
+      href="/deployment/docker" 
+      className="group block rounded-2xl border border-gray-200 dark:border-[#27272a] hover:border-[#4595db] dark:hover:border-[#4595db] overflow-hidden no-underline transition-colors"
+    >
+      <div className="h-40 bg-gradient-to-br from-[#4595db]/10 to-[#0494dc]/10 dark:from-[#4595db]/10 dark:to-[#0494dc]/10 flex items-center justify-center">
+        <svg className="w-20 h-20 text-[#4595db]" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M13.98 11.08h2.12a.19.19 0 0 0 .19-.19V9.01a.19.19 0 0 0-.19-.19h-2.12a.18.18 0 0 1-.18-.18V6.52a.19.19 0 0 0-.19-.18h-1.88a.19.19 0 0 0-.18.18v2.12a.18.18 0 0 1-.18.18H9.45a.19.19 0 0 0-.19.19v1.88c0 .1.08.18.19.18h2.12a.18.18 0 0 1 .18.18v2.12c0 .1.08.18.18.18h1.88c.1 0 .19-.08.19-.18v-2.12a.18.18 0 0 1 .18-.18zM12 0C5.37 0 0 5.37 0 12s5.37 12 12 12 12-5.37 12-12S18.63 0 12 0zm6.5 13.98a.98.98 0 0 1-.98.98h-11a.98.98 0 0 1-.98-.98v-3.96c0-.54.44-.98.98-.98h11c.54 0 .98.44.98.98v3.96z"/>
+        </svg>
+      </div>
+      <div className="p-6 bg-white dark:bg-[#1a1d27]">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">Deployment guide</h3>
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+          Deploy with Docker, Docker Compose, or Kubernetes. Production-ready configurations included.
+        </p>
+        <span className="text-sm font-medium text-[#4595db] group-hover:text-[#3a7ec7] flex items-center">
+          View deployment options
+          <svg className="ml-1 w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </span>
+      </div>
+    </a>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+    <a 
+      href="/configuration/backends" 
+      className="group block rounded-2xl border border-gray-200 dark:border-[#27272a] hover:border-[#4595db] dark:hover:border-[#4595db] overflow-hidden no-underline transition-colors"
+    >
+      <div className="h-40 bg-gradient-to-br from-[#5ebf9e]/10 to-[#4595db]/10 dark:from-[#5ebf9e]/10 dark:to-[#4595db]/10 flex items-center justify-center">
+        <svg className="w-20 h-20 text-[#5ebf9e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+        </svg>
+      </div>
+      <div className="p-6 bg-white dark:bg-[#1a1d27]">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">Configuration reference</h3>
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+          Complete guide to backends, WAF rules, rate limiting, GeoIP blocking, and bot detection.
+        </p>
+        <span className="text-sm font-medium text-[#4595db] group-hover:text-[#3a7ec7] flex items-center">
+          Browse configuration
+          <svg className="ml-1 w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </span>
+      </div>
+    </a>
 
-## Need inspiration?
+    <a 
+      href="/security/testing" 
+      className="group block rounded-2xl border border-gray-200 dark:border-[#27272a] hover:border-[#4595db] dark:hover:border-[#4595db] overflow-hidden no-underline transition-colors"
+    >
+      <div className="h-40 bg-gradient-to-br from-[#0494dc]/10 to-[#5ebf9e]/10 dark:from-[#0494dc]/10 dark:to-[#5ebf9e]/10 flex items-center justify-center">
+        <svg className="w-20 h-20 text-[#0494dc]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+        </svg>
+      </div>
+      <div className="p-6 bg-white dark:bg-[#1a1d27]">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">Security testing</h3>
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+          Test WAF protection with real attack payloads. Verify SQLi, XSS, RCE, and LFI detection.
+        </p>
+        <span className="text-sm font-medium text-[#4595db] group-hover:text-[#3a7ec7] flex items-center">
+          View test cases
+          <svg className="ml-1 w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </span>
+      </div>
+    </a>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    <a 
+      href="/api/environment-variables" 
+      className="group block rounded-2xl border border-gray-200 dark:border-[#27272a] hover:border-[#4595db] dark:hover:border-[#4595db] overflow-hidden no-underline transition-colors"
+    >
+      <div className="h-40 bg-gradient-to-br from-[#5ebf9e]/10 to-[#0494dc]/10 dark:from-[#5ebf9e]/10 dark:to-[#0494dc]/10 flex items-center justify-center">
+        <svg className="w-20 h-20 text-[#5ebf9e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+        </svg>
+      </div>
+      <div className="p-6 bg-white dark:bg-[#1a1d27]">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">API reference</h3>
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+          Complete reference for all environment variables, core functions, and internal APIs.
+        </p>
+        <span className="text-sm font-medium text-[#4595db] group-hover:text-[#3a7ec7] flex items-center">
+          Explore API docs
+          <svg className="ml-1 w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </span>
+      </div>
+    </a>
+  </div>
+</div>
+
+<div className="mt-20 mb-16 max-w-5xl mx-auto px-6">
+  <div className="rounded-2xl bg-gradient-to-br from-[#4595db] to-[#0494dc] p-8 sm:p-12 text-center">
+    <h2 className="text-3xl sm:text-4xl font-bold text-white mb-4">Ready to secure your applications?</h2>
+    <p className="text-lg text-white/90 mb-8 max-w-2xl mx-auto">
+      Deploy Coraza Proxy in minutes and protect your web applications and APIs from OWASP Top 10 vulnerabilities.
+    </p>
+    <div className="flex flex-col sm:flex-row gap-4 justify-center">
+      <a 
+        href="/quickstart" 
+        className="inline-flex items-center justify-center px-6 py-3 rounded-lg bg-white text-[#4595db] font-semibold hover:bg-gray-100 transition-colors"
+      >
+        Get Started
+        <svg className="ml-2 w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+        </svg>
+      </a>
+      <a 
+        href="https://github.com/alexperezortuno/go-coraza" 
+        className="inline-flex items-center justify-center px-6 py-3 rounded-lg border-2 border-white text-white font-semibold hover:bg-white/10 transition-colors"
+      >
+        View on GitHub
+      </a>
+    </div>
+  </div>
+</div>

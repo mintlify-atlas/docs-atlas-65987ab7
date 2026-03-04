@@ -1,0 +1,308 @@
+---
+title: 'WAF Integration'
+description: 'Coraza WAF transaction processing and request/response filtering'
+---
+
+## Overview
+
+The WAF integration provides deep request/response inspection using Coraza WAF with OWASP Core Rule Set. It processes connections, headers, and body content through configurable rule sets.
+
+## Functions
+
+### loadWAF()
+
+Loads a Web Application Firewall (WAF) configuration from a colon-separated list of file paths.
+
+```go main.go:215-224
+func loadWAF(paths string) (coraza.WAF, error) {
+    cfg := coraza.NewWAFConfig()
+    for _, f := range strings.Split(paths, ":") {
+        f = strings.TrimSpace(f)
+        if f != "" {
+            cfg = cfg.WithDirectivesFromFile(f)
+        }
+    }
+    return coraza.NewWAF(cfg)
+}
+```
+
+<ParamField path="paths" type="string" required>
+  Colon-separated list of configuration file paths (e.g., `"coraza.conf:/app/rules/*.conf"`)
+</ParamField>
+
+<ResponseField name="return" type="coraza.WAF">
+  Initialized WAF instance
+</ResponseField>
+
+<ResponseField name="error" type="error">
+  Error if WAF initialization fails
+</ResponseField>
+
+#### Usage Example
+
+From main.go:381-407:
+
+```go
+// Rules for sites (PL1)
+rulesSites := os.Getenv("CORAZA_RULES_PATH_SITES")
+if rulesSites == "" {
+    rulesSites = "/app/coraza.conf:/app/coreruleset/pl1-crs-setup.conf:/app/coreruleset/rules/*.conf"
+}
+
+// Rules for APIs (PL2)
+rulesAPIs := os.Getenv("CORAZA_RULES_PATH_APIS")
+if rulesAPIs == "" {
+    rulesAPIs = "/app/coraza.conf:/app/coreruleset/pl2-crs-setup.conf:/app/coreruleset/rules/REQUEST-901-INITIALIZATION.conf:/app/coreruleset/rules/*.conf"
+}
+
+// Load WAFs
+wafSites, err := loadWAF(rulesSites)
+if err != nil {
+    log.Fatalf("Error creating WAF sites: %v", err)
+}
+
+wafApis, err := loadWAF(rulesAPIs)
+if err != nil {
+    log.Fatalf("Error creating WAF APIs: %v", err)
+}
+```
+
+### shouldBlock()
+
+Determines if a request should be blocked based on the given interruption's status code.
+
+```go main.go:166-174
+func shouldBlock(it *ctypes.Interruption) (bool, int) {
+    if it == nil {
+        return false, 0
+    }
+    if it.Status < 400 {
+        return false, 0
+    }
+    return true, it.Status
+}
+```
+
+<ParamField path="it" type="*ctypes.Interruption">
+  Interruption result from WAF processing (can be nil)
+</ParamField>
+
+<ResponseField name="block" type="bool">
+  true if request should be blocked (status >= 400)
+</ResponseField>
+
+<ResponseField name="statusCode" type="int">
+  HTTP status code to return (0 if not blocking)
+</ResponseField>
+
+#### Logic
+
+- Returns `false, 0` if interruption is nil
+- Returns `false, 0` if status code < 400
+- Returns `true, statusCode` if status >= 400
+
+## WAF Transaction Processing
+
+Complete request/response processing flow from main.go:478-596.
+
+### 1. Create Transaction
+
+```go main.go:478-485
+tx := waf.NewTransaction()
+defer tx.ProcessLogging()
+defer func(tx ctypes.Transaction) {
+    err := tx.Close()
+    if err != nil {
+        log.Println("Error closing WAF transaction:", err)
+    }
+}(tx)
+```
+
+<Note>
+  Always defer `ProcessLogging()` and `Close()` to ensure proper cleanup and audit logging.
+</Note>
+
+### 2. Process Connection
+
+```go main.go:488-490
+_, clientPort := splitHostPort(r.RemoteAddr)
+serverIP, serverPort := splitHostPort(r.Host)
+tx.ProcessConnection(clientIP, clientPort, serverIP, serverPort)
+```
+
+Registers connection metadata including client/server IPs and ports.
+
+### 3. Process Request Headers
+
+```go main.go:493-507
+// Add headers
+for k, v := range r.Header {
+    for _, vv := range v {
+        tx.AddRequestHeader(k, vv)
+    }
+}
+tx.ProcessURI(r.URL.String(), r.Method, r.Proto)
+
+// Check for blocking
+if it := tx.ProcessRequestHeaders(); it != nil {
+    if block, status := shouldBlock(it); block {
+        w.WriteHeader(status)
+        _, _ = w.Write([]byte("Request blocked by WAF (headers)"))
+        log.Println("Request blocked by WAF (headers)")
+        return
+    }
+}
+```
+
+### 4. Process Request Body
+
+```go main.go:510-538
+if r.Body != nil && (r.ContentLength > 0 || r.Header.Get("Transfer-Encoding") != "") {
+    body, err := io.ReadAll(r.Body)
+    _ = r.Body.Close()
+    if err != nil {
+        log.Println("Error reading body:", err)
+        http.Error(w, "Error reading body", http.StatusBadRequest)
+        return
+    }
+
+    if len(body) > 0 {
+        _, _, err = tx.WriteRequestBody(body)
+        if err != nil {
+            log.Println("Error processing body:", err)
+            http.Error(w, "Error processing body", http.StatusBadRequest)
+            return
+        }
+
+        if it, _ := tx.ProcessRequestBody(); it != nil {
+            w.WriteHeader(it.Status)
+            _, _ = w.Write([]byte("Request blocked by WAF (body)"))
+            log.Println("Request blocked by WAF (body)")
+            return
+        }
+
+        // Restore body for backend
+        r.Body = io.NopCloser(bytes.NewReader(body))
+        r.ContentLength = int64(len(body))
+        r.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+    }
+}
+```
+
+<Warning>
+  Body content is fully read into memory. Consider size limits for production use.
+</Warning>
+
+### 5. Process Response Headers
+
+```go main.go:573-589
+// Copy headers from backend response
+for k, v := range resp.Header {
+    for _, vv := range v {
+        tx.AddResponseHeader(k, vv)
+        w.Header().Add(k, vv)
+    }
+}
+
+// Check response headers
+if it := tx.ProcessResponseHeaders(resp.StatusCode, resp.Proto); it != nil {
+    if block, status := shouldBlock(it); block {
+        w.WriteHeader(status)
+        _, err := w.Write([]byte("Response blocked by WAF"))
+        if err != nil {
+            return
+        }
+        return
+    }
+}
+```
+
+### 6. Send Response
+
+```go main.go:591-595
+w.WriteHeader(resp.StatusCode)
+_, err = io.Copy(w, resp.Body)
+if err != nil {
+    return
+}
+```
+
+## WAF Selection by Host
+
+Different WAF instances for different host types:
+
+```go main.go:460-476
+hostOnly := strings.Split(r.Host, ":")[0]
+var waf coraza.WAF
+
+if _, ok := apisHosts[hostOnly]; ok {
+    waf = wafApis  // PL2 rules for APIs
+}
+
+if _, ok := webHosts[hostOnly]; ok {
+    waf = wafSites  // PL1 rules for sites
+}
+
+if waf == nil {
+    log.Println("WAF not configured for host:", hostOnly)
+    http.Error(w, "WAF not configured for this host", http.StatusInternalServerError)
+    return
+}
+```
+
+## Environment Variables
+
+See [Environment Variables](/api/environment-variables) for WAF configuration:
+
+- `CORAZA_RULES_PATH_SITES` - Rule files for web sites (PL1)
+- `CORAZA_RULES_PATH_APIS` - Rule files for APIs (PL2)
+- `PROXY_APIS_HOSTS` - Comma-separated API hostnames
+- `PROXY_WEB_HOSTS` - Comma-separated web site hostnames
+
+## Blocking Stages
+
+Requests can be blocked at multiple stages:
+
+1. **Connection Phase**: IP, port validation
+2. **Request Headers**: Method, URI, header inspection
+3. **Request Body**: POST/PUT data, file uploads
+4. **Response Headers**: Outbound header validation
+
+## Example: Full Request Flow
+
+```go
+// 1. Create WAF transaction
+tx := waf.NewTransaction()
+defer tx.ProcessLogging()
+defer tx.Close()
+
+// 2. Process connection
+tx.ProcessConnection("192.168.1.100", 54321, "example.com", 443)
+
+// 3. Add headers
+tx.AddRequestHeader("User-Agent", "Mozilla/5.0")
+tx.AddRequestHeader("Content-Type", "application/json")
+tx.ProcessURI("/api/users", "POST", "HTTP/1.1")
+
+// 4. Check headers
+if it := tx.ProcessRequestHeaders(); it != nil {
+    if block, status := shouldBlock(it); block {
+        return status // Blocked
+    }
+}
+
+// 5. Process body
+body := []byte(`{"name":"test"}`)
+tx.WriteRequestBody(body)
+if it, _ := tx.ProcessRequestBody(); it != nil {
+    return it.Status // Blocked
+}
+
+// 6. Process response (from backend)
+tx.AddResponseHeader("Content-Type", "application/json")
+if it := tx.ProcessResponseHeaders(200, "HTTP/1.1"); it != nil {
+    if block, status := shouldBlock(it); block {
+        return status // Blocked
+    }
+}
+```
